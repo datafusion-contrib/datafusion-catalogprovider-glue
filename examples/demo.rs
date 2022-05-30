@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use arrow::array::StringArray;
+use datafusion::arrow::array::StringArray;
 use datafusion::error::Result;
 use datafusion::prelude::*;
 use datafusion_catalogprovider_glue::catalog_provider::glue::GlueCatalogProvider;
