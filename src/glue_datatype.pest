@@ -1,11 +1,19 @@
-dataType = { simpleType | arrayType | mapType | structType }
-simpleType = { "int" | "boolean" | "bigint" | "float" | "double" | "binary" | "timestamp" | "string" }
-arrayType = { "array<" ~ dataType ~ ">" }
-mapType = { "map<" ~ dataType ~ "," ~ dataType ~ ">" }
-structType = { "struct<" ~ structFields ~ ">" }
+DataType = _{ SimpleType | ArrayType | MapType | StructType }
+SimpleType = _{ Int | Boolean | BigInt | Float | Double | Binary | Timestamp | String }
+Int = { "int" }
+Boolean = { "boolean" }
+BigInt = { "bigint" }
+Float = { "float" }
+Double = { "double" }
+Binary = { "binary" }
+Timestamp = { "timestamp" }
+String = { "string" }
+ArrayType = { "array<" ~ DataType ~ ">" }
+MapType = { "map<" ~ DataType ~ "," ~ DataType ~ ">" }
+StructType = { "struct<" ~ structFields ~ ">" }
 structFields = { structField ~ ("," ~ structField)* }
-structField = { ident ~ ":" ~ dataType }
-alpha = { 'a'..'z' | 'A'..'Z' }
-digit = { '0'..'9' }
+structField = { ident ~ ":" ~ DataType }
+alpha = _{ 'a'..'z' | 'A'..'Z' }
+digit = _{ '0'..'9' }
 ident = { (alpha | digit)+ }
 

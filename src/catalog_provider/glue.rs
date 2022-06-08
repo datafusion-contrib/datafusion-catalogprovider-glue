@@ -359,6 +359,7 @@ impl CatalogProvider for GlueCatalogProvider {
 mod tests {
     use super::*;
     use aws_sdk_glue::model::Column;
+    use datafusion::arrow::datatypes::TimeUnit;
 
     #[test]
     fn test_map_int_glue_column_to_arrow_field() -> Result<()> {
@@ -668,30 +669,139 @@ mod tests {
         use pest::Parser;
 
         // simple types
-        assert!(GlueDataTypeParser::parse(Rule::dataType, "int").is_ok());
-        assert!(GlueDataTypeParser::parse(Rule::dataType, "boolean").is_ok());
-        assert!(GlueDataTypeParser::parse(Rule::dataType, "bigint").is_ok());
-        assert!(GlueDataTypeParser::parse(Rule::dataType, "float").is_ok());
-        assert!(GlueDataTypeParser::parse(Rule::dataType, "double").is_ok());
-        assert!(GlueDataTypeParser::parse(Rule::dataType, "binary").is_ok());
-        assert!(GlueDataTypeParser::parse(Rule::dataType, "timestamp").is_ok());
-        assert!(GlueDataTypeParser::parse(Rule::dataType, "string").is_ok());
+        assert!(GlueDataTypeParser::parse(Rule::DataType, "int").is_ok());
+        assert!(GlueDataTypeParser::parse(Rule::DataType, "boolean").is_ok());
+        assert!(GlueDataTypeParser::parse(Rule::DataType, "bigint").is_ok());
+        assert!(GlueDataTypeParser::parse(Rule::DataType, "float").is_ok());
+        assert!(GlueDataTypeParser::parse(Rule::DataType, "double").is_ok());
+        assert!(GlueDataTypeParser::parse(Rule::DataType, "binary").is_ok());
+        assert!(GlueDataTypeParser::parse(Rule::DataType, "timestamp").is_ok());
+        assert!(GlueDataTypeParser::parse(Rule::DataType, "string").is_ok());
 
         // array type
-        assert!(GlueDataTypeParser::parse(Rule::dataType, "array<int>").is_ok());
-        assert!(GlueDataTypeParser::parse(Rule::dataType, "array<bigint>").is_ok());
-        assert!(GlueDataTypeParser::parse(Rule::dataType, "array<array<bigint>>").is_ok());
+        assert!(GlueDataTypeParser::parse(Rule::DataType, "array<int>").is_ok());
+        assert!(GlueDataTypeParser::parse(Rule::DataType, "array<bigint>").is_ok());
+        assert!(GlueDataTypeParser::parse(Rule::DataType, "array<array<bigint>>").is_ok());
 
         // map type
-        assert!(GlueDataTypeParser::parse(Rule::dataType, "map<int,int>").is_ok());
-        assert!(GlueDataTypeParser::parse(Rule::dataType, "map<int,map<string,array<int>>>").is_ok());
-        assert!(GlueDataTypeParser::parse(Rule::dataType, "map<map<string,array<int>>,array<timestamp>>").is_ok());
+        assert!(GlueDataTypeParser::parse(Rule::DataType, "map<int,int>").is_ok());
+        assert!(GlueDataTypeParser::parse(Rule::DataType, "map<int,map<string,array<int>>>").is_ok());
+        assert!(GlueDataTypeParser::parse(Rule::DataType, "map<map<string,array<int>>,array<timestamp>>").is_ok());
 
         // struct type
-        assert!(GlueDataTypeParser::parse(Rule::dataType, "struct<id:int>").is_ok());
-        assert!(GlueDataTypeParser::parse(Rule::dataType, "struct<id:int,nm:map<int,bigint>,ns:struct<x:int>>").is_ok());
+        assert!(GlueDataTypeParser::parse(Rule::DataType, "struct<id:int>").is_ok());
+        assert!(GlueDataTypeParser::parse(Rule::DataType, "struct<id:int,nm:map<int,bigint>,ns:struct<x:int>>").is_ok());
+
+        let pairs = GlueDataTypeParser::parse(Rule::DataType, "struct<id:int,nm:map<int,bigint>,ns:struct<x:int>>").unwrap();
+        println!("pairs: {}", pairs);
+
+        for pair in pairs {
+            // A pair is a combination of the rule which matched and a span of input
+            println!("Rule:    {:?}", pair.as_rule());
+            println!("Span:    {:?}", pair.as_span());
+            println!("Text:    {}", pair.as_str());
+
+            // A pair can be converted to an iterator of the tokens which make it up:
+            for inner_pair in pair.into_inner() {
+                match inner_pair.as_rule() {
+                    //Rule::alpha => println!("Letter:  {}", inner_pair.as_str()),
+                    //Rule::digit => println!("Digit:   {}", inner_pair.as_str()),
+                    //_ => unreachable!()
+                    _ => println!("inner_pair: {}", inner_pair.as_str()),
+                };
+            }
+        }
 
         Ok(())
+    }
+
+    //Result<Pairs<R>, Error<R>>
+
+    //        assert!(GlueDataTypeParser::parse(Rule::DataType, "struct<id:int,nm:map<int,bigint>,ns:struct<x:int>>").is_ok());
+
+    #[test]
+    fn test_map_glue_data_type() -> Result<()> {
+        //let xx = map_glue_data_type("struct<id:int,nm:map<int,bigint>,ns:struct<x:int>>");
+
+        // simple types
+        assert_eq!(map_glue_data_type("int"), DataType::Int32);
+        assert_eq!(map_glue_data_type("boolean"), DataType::Boolean);
+        assert_eq!(map_glue_data_type("bigint"), DataType::Int64);
+        assert_eq!(map_glue_data_type("float"), DataType::Float32);
+        assert_eq!(map_glue_data_type("double"), DataType::Float64);
+        assert_eq!(map_glue_data_type("binary"), DataType::Binary);
+        assert_eq!(map_glue_data_type("timestamp"), DataType::Timestamp(TimeUnit::Nanosecond, None));
+        assert_eq!(map_glue_data_type("string"), DataType::Utf8);
+
+        let list_of_string = DataType::List(Box::new(Field::new("id", DataType::Utf8, true)));
+
+        // array type
+        assert_eq!(map_glue_data_type("array<string>"), list_of_string);
+        assert_eq!(map_glue_data_type("array<array<string>>"), DataType::List(Box::new(Field::new("id", list_of_string.clone(), true))));
+
+        let map_of_string_and_boolean = DataType::Map(Box::new(Field::new(
+            "entries",
+            DataType::Struct(vec![
+                Field::new("key", DataType::Utf8, true),
+                Field::new("value", DataType::Boolean, true),
+            ]),
+            true)), true);
+
+        // map type
+        assert_eq!(map_glue_data_type("map<string,boolean>"), map_of_string_and_boolean.clone());
+        assert_eq!(map_glue_data_type("map<map<string,boolean>,array<string>>"), DataType::Map(Box::new(Field::new(
+            "entries",
+            DataType::Struct(vec![
+                Field::new("key", map_of_string_and_boolean, true),
+                Field::new("value", list_of_string, true),
+            ]),
+            true)), true));
+        Ok(())
+    }
+
+    fn map_glue_data_type(glue_data_type: &str) -> DataType {
+
+        use pest::Parser;
+        let mut pairs = GlueDataTypeParser::parse(Rule::DataType, glue_data_type).unwrap();
+        let pair = pairs.next().unwrap();
+
+        match pair.as_rule() {
+            Rule::Int => DataType::Int32,
+            Rule::Boolean => DataType::Boolean,
+            Rule::BigInt => DataType::Int64,
+            Rule::Float => DataType::Float32,
+            Rule::Double => DataType::Float64,
+            Rule::Binary => DataType::Binary,
+            Rule::Timestamp => DataType::Timestamp(TimeUnit::Nanosecond, None),
+            Rule::String => DataType::Utf8,
+            Rule::ArrayType => {
+                let array_glue_data_type = pair.into_inner().next().unwrap().as_str();
+                let array_arrow_data_type = map_glue_data_type(array_glue_data_type);
+                DataType::List(Box::new(Field::new("id", array_arrow_data_type, true)))
+            },
+            Rule::MapType => {
+                let mut inner = pair.into_inner();
+                let key_glue_data_type = inner.next().unwrap().as_str();
+                let value_glue_data_type = inner.next().unwrap().as_str();
+                //println!("key datatype: {}, value datatype: {}", key_glue_data_type, value_glue_data_type);
+
+                let key_arrow_data_type = map_glue_data_type(key_glue_data_type);
+                let value_arrow_data_type = map_glue_data_type(value_glue_data_type);
+
+                DataType::Map(Box::new(Field::new(
+                    "entries",
+                    DataType::Struct(vec![
+                        Field::new("key", key_arrow_data_type, true),
+                        Field::new("value", value_arrow_data_type, true),
+                    ]),
+                    true)), true)
+            },
+            //Rule::StructType => DataType::Binary,
+            _ => {
+                println!("the rule is: {:?}", pair.as_rule());
+                unreachable!()
+            },
+        }
     }
 }
 
