@@ -243,6 +243,12 @@ impl GlueCatalogProvider {
             Rule::Binary => DataType::Binary,
             Rule::Timestamp => DataType::Timestamp(TimeUnit::Nanosecond, None),
             Rule::String => DataType::Utf8,
+            Rule::Decimal => {
+                let mut inner = pair.into_inner();
+                let precision = inner.next().unwrap().as_str().parse().unwrap();
+                let scale = inner.next().unwrap().as_str().parse().unwrap();
+                DataType::Decimal(precision, scale)
+            }
             Rule::ArrayType => {
                 let array_glue_data_type = pair.into_inner().next().unwrap().as_str();
                 let array_arrow_data_type = Self::map_glue_data_type(array_glue_data_type);
@@ -669,6 +675,8 @@ mod tests {
         // struct type
         assert_eq!(GlueCatalogProvider::map_glue_data_type("struct<reply_id:int>"), struct_of_int);
         assert_eq!(GlueCatalogProvider::map_glue_data_type("struct<reply:struct<reply_id:int>>"), DataType::Struct(vec![Field::new("reply", struct_of_int, true)]));
+
+        assert_eq!(GlueCatalogProvider::map_glue_data_type("decimal(12,9)"), DataType::Decimal(12,9));
 
         Ok(())
     }
