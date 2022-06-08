@@ -1027,10 +1027,8 @@ dependencies = [
  "aws-types 0.12.0",
  "datafusion",
  "datafusion-objectstore-s3",
- "lazy_static",
  "pest",
  "pest_derive",
- "regex",
  "tokio",
 ]
 

@@ -20,7 +20,7 @@ use aws_sdk_glue::model::{Column, StorageDescriptor, Table};
 use aws_sdk_glue::Client;
 use aws_types::SdkConfig;
 use datafusion::arrow::datatypes::TimeUnit::Nanosecond;
-use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use datafusion::catalog::catalog::CatalogProvider;
 use datafusion::catalog::schema::{ObjectStoreSchemaProvider, SchemaProvider};
 use datafusion::datasource::file_format::avro::AvroFormat;
@@ -29,8 +29,6 @@ use datafusion::datasource::file_format::parquet::ParquetFormat;
 use datafusion::datasource::file_format::FileFormat;
 use datafusion::datasource::listing::{ListingOptions, ListingTableConfig};
 use datafusion_objectstore_s3::object_store::s3::S3FileSystem;
-use lazy_static::lazy_static;
-use regex::Regex;
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -231,82 +229,65 @@ impl GlueCatalogProvider {
         Ok(listing_options)
     }
 
+    fn map_glue_data_type(glue_data_type: &str) -> DataType {
+
+        use pest::Parser;
+        let mut pairs = GlueDataTypeParser::parse(Rule::DataType, glue_data_type).unwrap();
+        let pair = pairs.next().unwrap();
+
+        match pair.as_rule() {
+            Rule::Int => DataType::Int32,
+            Rule::Boolean => DataType::Boolean,
+            Rule::BigInt => DataType::Int64,
+            Rule::Float => DataType::Float32,
+            Rule::Double => DataType::Float64,
+            Rule::Binary => DataType::Binary,
+            Rule::Timestamp => DataType::Timestamp(TimeUnit::Nanosecond, None),
+            Rule::String => DataType::Utf8,
+            Rule::ArrayType => {
+                let array_glue_data_type = pair.into_inner().next().unwrap().as_str();
+                let array_arrow_data_type = Self::map_glue_data_type(array_glue_data_type);
+                DataType::List(Box::new(Field::new("id", array_arrow_data_type, true)))
+            },
+            Rule::MapType => {
+                let mut inner = pair.into_inner();
+                let key_glue_data_type = inner.next().unwrap().as_str();
+                let value_glue_data_type = inner.next().unwrap().as_str();
+
+                let key_arrow_data_type = Self::map_glue_data_type(key_glue_data_type);
+                let value_arrow_data_type = Self::map_glue_data_type(value_glue_data_type);
+
+                DataType::Map(Box::new(Field::new(
+                    "entries",
+                    DataType::Struct(vec![
+                        Field::new("key", key_arrow_data_type, true),
+                        Field::new("value", value_arrow_data_type, true),
+                    ]),
+                    true)), true)
+            },
+            Rule::StructType => {
+                let inner = pair.into_inner();
+                let fields = inner.map(|field| {
+                    let mut struct_field_inner = field.into_inner();
+                    let field_name = struct_field_inner.next().unwrap().as_str();
+                    let field_glue_data_type = struct_field_inner.next().unwrap().as_str();
+                    let field_arrow_data_type = Self::map_glue_data_type(field_glue_data_type);
+                    Field::new(field_name, field_arrow_data_type, true)
+                }).collect();
+                DataType::Struct(fields)
+            },
+            _ => {
+                println!("the rule is: {:?}", pair.as_rule());
+                unreachable!()
+            },
+        }
+    }
+
     /*
     https://docs.aws.amazon.com/glue/latest/dg/aws-glue-api-catalog-tables.html#aws-glue-api-catalog-tables-Column
      */
-    fn map_glue_type_to_arrow_data_type(glue_name: &str, glue_type: &str) -> Result<DataType> {
-        lazy_static! {
-            static ref DECIMAL_RE: Regex =
-                Regex::new("^decimal\\((?P<precision>\\d+)\\s*,\\s*(?P<scale>\\d+)\\)$").unwrap();
-            static ref ARRAY_RE: Regex = Regex::new("^array<(?P<array_type>.+)>$").unwrap();
-            static ref STRUCT_RE: Regex = Regex::new("^struct<(?P<field_list>.+)>$").unwrap();
-            static ref MAP_RE: Regex =
-                Regex::new("^map<\\s*(?P<key_type>[^\\s,]+)\\s*,\\s*(?P<value_type>[^\\s]+)>$")
-                    .unwrap();
-        }
-
-        match glue_type {
-            "int" => Ok(DataType::Int32),
-            "boolean" => Ok(DataType::Boolean),
-            "bigint" => Ok(DataType::Int64),
-            "float" => Ok(DataType::Float32),
-            "double" => Ok(DataType::Float64),
-            "binary" => Ok(DataType::Binary),
-            "timestamp" => Ok(DataType::Timestamp(Nanosecond, None)),
-            "string" => Ok(DataType::Utf8),
-            _ => {
-                if let Some(decimal_cg) = DECIMAL_RE.captures(glue_type) {
-                    let precision = decimal_cg
-                        .name("precision")
-                        .unwrap()
-                        .as_str()
-                        .parse()
-                        .unwrap();
-                    let scale = decimal_cg.name("scale").unwrap().as_str().parse().unwrap();
-                    Ok(DataType::Decimal(precision, scale))
-                } else if let Some(array_cg) = ARRAY_RE.captures(glue_type) {
-                    let array_type = array_cg.name("array_type").unwrap().as_str();
-                    //println!("array type: {}", array_type);
-                    let field = Self::map_to_arrow_field(glue_name, array_type)?;
-                    Ok(DataType::List(Box::new(field)))
-                } else if let Some(struct_cg) = STRUCT_RE.captures(glue_type) {
-                    let field_list = struct_cg.name("field_list").unwrap().as_str();
-
-                    // need to do this better...
-
-                    //println!("field list: {}", field_list);
-                    let mut fields = Vec::new();
-                    let pairs = field_list.split(',');
-                    for pair in pairs {
-                        let items: Vec<&str> = pair.split(':').collect();
-                        let item_name = items[0];
-                        let item_type = items[1];
-                        let item_field = Self::map_to_arrow_field(item_name, item_type)?;
-                        fields.push(item_field)
-                    }
-                    Ok(DataType::Struct(fields))
-                } else if let Some(map_cg) = MAP_RE.captures(glue_type) {
-                    let key_type = map_cg.name("key_type").unwrap().as_str();
-                    let value_type = map_cg.name("value_type").unwrap().as_str();
-                    //println!("key type: {}, value type: {}", key_type, value_type);
-                    let key_field = Self::map_to_arrow_field("key", key_type)?;
-                    let value_field = Self::map_to_arrow_field("value", value_type)?;
-                    Ok(DataType::Map(
-                        Box::new(Field::new(
-                            "entries",
-                            DataType::Struct(vec![key_field, value_field]),
-                            true,
-                        )),
-                        true,
-                    ))
-                } else {
-                    Err(GlueError::NotImplemented(format!(
-                        "No arrow type for gluetype: {}",
-                        &glue_type
-                    )))
-                }
-            }
-        }
+    fn map_glue_type_to_arrow_data_type(_: &str, glue_type: &str) -> Result<DataType> {
+        Ok(Self::map_glue_data_type(glue_type))
     }
 
     fn map_glue_column_to_arrow_field(glue_column: &Column) -> Result<Field> {
@@ -646,98 +627,24 @@ mod tests {
         Ok(())
     }
 
-    /*
-    struct Tokenizer<I: Iterator<Item=char>>(lexers::Scanner<I>);
-
-    impl<I: Iterator<Item=char>> Iterator for Tokenizer<I> {
-        type Item = String;
-        fn next(&mut self) -> Option<Self::Item> {
-            self.0.scan_whitespace();
-            self.0.scan_math_op()
-                .or_else(|| self.0.scan_number())
-                .or_else(|| self.0.scan_identifier())
-        }
-    }
-
-    fn tokenizer<I: Iterator<Item=char>>(input: I) -> Tokenizer<I> {
-        Tokenizer(lexers::Scanner::new(input))
-    }*/
-
-    #[test]
-    fn test_parser() -> Result<()> {
-
-        use pest::Parser;
-
-        // simple types
-        assert!(GlueDataTypeParser::parse(Rule::DataType, "int").is_ok());
-        assert!(GlueDataTypeParser::parse(Rule::DataType, "boolean").is_ok());
-        assert!(GlueDataTypeParser::parse(Rule::DataType, "bigint").is_ok());
-        assert!(GlueDataTypeParser::parse(Rule::DataType, "float").is_ok());
-        assert!(GlueDataTypeParser::parse(Rule::DataType, "double").is_ok());
-        assert!(GlueDataTypeParser::parse(Rule::DataType, "binary").is_ok());
-        assert!(GlueDataTypeParser::parse(Rule::DataType, "timestamp").is_ok());
-        assert!(GlueDataTypeParser::parse(Rule::DataType, "string").is_ok());
-
-        // array type
-        assert!(GlueDataTypeParser::parse(Rule::DataType, "array<int>").is_ok());
-        assert!(GlueDataTypeParser::parse(Rule::DataType, "array<bigint>").is_ok());
-        assert!(GlueDataTypeParser::parse(Rule::DataType, "array<array<bigint>>").is_ok());
-
-        // map type
-        assert!(GlueDataTypeParser::parse(Rule::DataType, "map<int,int>").is_ok());
-        assert!(GlueDataTypeParser::parse(Rule::DataType, "map<int,map<string,array<int>>>").is_ok());
-        assert!(GlueDataTypeParser::parse(Rule::DataType, "map<map<string,array<int>>,array<timestamp>>").is_ok());
-
-        // struct type
-        assert!(GlueDataTypeParser::parse(Rule::DataType, "struct<id:int>").is_ok());
-        assert!(GlueDataTypeParser::parse(Rule::DataType, "struct<id:int,nm:map<int,bigint>,ns:struct<x:int>>").is_ok());
-
-        let pairs = GlueDataTypeParser::parse(Rule::DataType, "struct<id:int,nm:map<int,bigint>,ns:struct<x:int>>").unwrap();
-        println!("pairs: {}", pairs);
-
-        for pair in pairs {
-            // A pair is a combination of the rule which matched and a span of input
-            println!("Rule:    {:?}", pair.as_rule());
-            println!("Span:    {:?}", pair.as_span());
-            println!("Text:    {}", pair.as_str());
-
-            // A pair can be converted to an iterator of the tokens which make it up:
-            for inner_pair in pair.into_inner() {
-                match inner_pair.as_rule() {
-                    //Rule::alpha => println!("Letter:  {}", inner_pair.as_str()),
-                    //Rule::digit => println!("Digit:   {}", inner_pair.as_str()),
-                    //_ => unreachable!()
-                    _ => println!("inner_pair: {}", inner_pair.as_str()),
-                };
-            }
-        }
-
-        Ok(())
-    }
-
-    //Result<Pairs<R>, Error<R>>
-
-    //        assert!(GlueDataTypeParser::parse(Rule::DataType, "struct<id:int,nm:map<int,bigint>,ns:struct<x:int>>").is_ok());
-
     #[test]
     fn test_map_glue_data_type() -> Result<()> {
-        //let xx = map_glue_data_type("struct<id:int,nm:map<int,bigint>,ns:struct<x:int>>");
 
         // simple types
-        assert_eq!(map_glue_data_type("int"), DataType::Int32);
-        assert_eq!(map_glue_data_type("boolean"), DataType::Boolean);
-        assert_eq!(map_glue_data_type("bigint"), DataType::Int64);
-        assert_eq!(map_glue_data_type("float"), DataType::Float32);
-        assert_eq!(map_glue_data_type("double"), DataType::Float64);
-        assert_eq!(map_glue_data_type("binary"), DataType::Binary);
-        assert_eq!(map_glue_data_type("timestamp"), DataType::Timestamp(TimeUnit::Nanosecond, None));
-        assert_eq!(map_glue_data_type("string"), DataType::Utf8);
+        assert_eq!(GlueCatalogProvider::map_glue_data_type("int"), DataType::Int32);
+        assert_eq!(GlueCatalogProvider::map_glue_data_type("boolean"), DataType::Boolean);
+        assert_eq!(GlueCatalogProvider::map_glue_data_type("bigint"), DataType::Int64);
+        assert_eq!(GlueCatalogProvider::map_glue_data_type("float"), DataType::Float32);
+        assert_eq!(GlueCatalogProvider::map_glue_data_type("double"), DataType::Float64);
+        assert_eq!(GlueCatalogProvider::map_glue_data_type("binary"), DataType::Binary);
+        assert_eq!(GlueCatalogProvider::map_glue_data_type("timestamp"), DataType::Timestamp(TimeUnit::Nanosecond, None));
+        assert_eq!(GlueCatalogProvider::map_glue_data_type("string"), DataType::Utf8);
 
         let list_of_string = DataType::List(Box::new(Field::new("id", DataType::Utf8, true)));
 
         // array type
-        assert_eq!(map_glue_data_type("array<string>"), list_of_string);
-        assert_eq!(map_glue_data_type("array<array<string>>"), DataType::List(Box::new(Field::new("id", list_of_string.clone(), true))));
+        assert_eq!(GlueCatalogProvider::map_glue_data_type("array<string>"), list_of_string);
+        assert_eq!(GlueCatalogProvider::map_glue_data_type("array<array<string>>"), DataType::List(Box::new(Field::new("id", list_of_string.clone(), true))));
 
         let map_of_string_and_boolean = DataType::Map(Box::new(Field::new(
             "entries",
@@ -748,8 +655,8 @@ mod tests {
             true)), true);
 
         // map type
-        assert_eq!(map_glue_data_type("map<string,boolean>"), map_of_string_and_boolean.clone());
-        assert_eq!(map_glue_data_type("map<map<string,boolean>,array<string>>"), DataType::Map(Box::new(Field::new(
+        assert_eq!(GlueCatalogProvider::map_glue_data_type("map<string,boolean>"), map_of_string_and_boolean.clone());
+        assert_eq!(GlueCatalogProvider::map_glue_data_type("map<map<string,boolean>,array<string>>"), DataType::Map(Box::new(Field::new(
             "entries",
             DataType::Struct(vec![
                 Field::new("key", map_of_string_and_boolean, true),
@@ -761,65 +668,10 @@ mod tests {
         let struct_of_int = DataType::Struct(vec![Field::new("reply_id", DataType::Int32, true)]);
 
         // struct type
-        assert_eq!(map_glue_data_type("struct<reply_id:int>"), struct_of_int);
-        assert_eq!(map_glue_data_type("struct<reply:struct<reply_id:int>>"), DataType::Struct(vec![Field::new("reply", struct_of_int, true)]));
+        assert_eq!(GlueCatalogProvider::map_glue_data_type("struct<reply_id:int>"), struct_of_int);
+        assert_eq!(GlueCatalogProvider::map_glue_data_type("struct<reply:struct<reply_id:int>>"), DataType::Struct(vec![Field::new("reply", struct_of_int, true)]));
 
         Ok(())
-    }
-
-    fn map_glue_data_type(glue_data_type: &str) -> DataType {
-
-        use pest::Parser;
-        let mut pairs = GlueDataTypeParser::parse(Rule::DataType, glue_data_type).unwrap();
-        let pair = pairs.next().unwrap();
-
-        match pair.as_rule() {
-            Rule::Int => DataType::Int32,
-            Rule::Boolean => DataType::Boolean,
-            Rule::BigInt => DataType::Int64,
-            Rule::Float => DataType::Float32,
-            Rule::Double => DataType::Float64,
-            Rule::Binary => DataType::Binary,
-            Rule::Timestamp => DataType::Timestamp(TimeUnit::Nanosecond, None),
-            Rule::String => DataType::Utf8,
-            Rule::ArrayType => {
-                let array_glue_data_type = pair.into_inner().next().unwrap().as_str();
-                let array_arrow_data_type = map_glue_data_type(array_glue_data_type);
-                DataType::List(Box::new(Field::new("id", array_arrow_data_type, true)))
-            },
-            Rule::MapType => {
-                let mut inner = pair.into_inner();
-                let key_glue_data_type = inner.next().unwrap().as_str();
-                let value_glue_data_type = inner.next().unwrap().as_str();
-                //println!("key datatype: {}, value datatype: {}", key_glue_data_type, value_glue_data_type);
-
-                let key_arrow_data_type = map_glue_data_type(key_glue_data_type);
-                let value_arrow_data_type = map_glue_data_type(value_glue_data_type);
-
-                DataType::Map(Box::new(Field::new(
-                    "entries",
-                    DataType::Struct(vec![
-                        Field::new("key", key_arrow_data_type, true),
-                        Field::new("value", value_arrow_data_type, true),
-                    ]),
-                    true)), true)
-            },
-            Rule::StructType => {
-                let inner = pair.into_inner();
-                let fields = inner.map(|field| {
-                    let mut struct_field_inner = field.into_inner();
-                    let field_name = struct_field_inner.next().unwrap().as_str();
-                    let field_glue_data_type = struct_field_inner.next().unwrap().as_str();
-                    let field_arrow_data_type = map_glue_data_type(field_glue_data_type);
-                    Field::new(field_name, field_arrow_data_type, true)
-                }).collect();
-                DataType::Struct(fields)
-            },
-            _ => {
-                println!("the rule is: {:?}", pair.as_rule());
-                unreachable!()
-            },
-        }
     }
 }
 
