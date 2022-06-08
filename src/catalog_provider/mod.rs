@@ -17,3 +17,4 @@
 
 /// `CatalogProvider` implementation for Amazon AWS Glue
 pub mod glue;
+pub mod glue_data_type_parser;

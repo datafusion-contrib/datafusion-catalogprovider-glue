@@ -15,6 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use crate::catalog_provider::glue_data_type_parser::*;
 use crate::error::{GlueError, Result};
 use aws_sdk_glue::model::{Column, StorageDescriptor, Table};
 use aws_sdk_glue::Client;
@@ -737,9 +738,3 @@ mod tests {
         Ok(())
     }
 }
-
-use pest_derive::Parser;
-/// `GlueDataTypeParser` implementation for parsing glue datatype strings
-#[derive(Parser)]
-#[grammar = "glue_datatype.pest"]
-struct GlueDataTypeParser;
