@@ -358,7 +358,7 @@ mod tests {
     use aws_sdk_glue::model::Column;
 
     #[test]
-    fn test_map_glue_column_to_arrow_field() -> Result<()> {
+    fn test_map_int_glue_column_to_arrow_field() -> Result<()> {
         assert_eq!(
             GlueCatalogProvider::map_glue_column_to_arrow_field(
                 &Column::builder().name("id").r#type("int").build()
@@ -366,6 +366,11 @@ mod tests {
             .unwrap(),
             Field::new("id", DataType::Int32, true)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_map_bigint_glue_column_to_arrow_field() -> Result<()> {
         assert_eq!(
             GlueCatalogProvider::map_glue_column_to_arrow_field(
                 &Column::builder().name("id").r#type("bigint").build()
@@ -373,6 +378,11 @@ mod tests {
             .unwrap(),
             Field::new("id", DataType::Int64, true)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_map_float_glue_column_to_arrow_field() -> Result<()> {
         assert_eq!(
             GlueCatalogProvider::map_glue_column_to_arrow_field(
                 &Column::builder().name("id").r#type("float").build()
@@ -380,6 +390,11 @@ mod tests {
             .unwrap(),
             Field::new("id", DataType::Float32, true)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_map_double_glue_column_to_arrow_field() -> Result<()> {
         assert_eq!(
             GlueCatalogProvider::map_glue_column_to_arrow_field(
                 &Column::builder().name("id").r#type("double").build()
@@ -387,6 +402,11 @@ mod tests {
             .unwrap(),
             Field::new("id", DataType::Float64, true)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_map_boolean_glue_column_to_arrow_field() -> Result<()> {
         assert_eq!(
             GlueCatalogProvider::map_glue_column_to_arrow_field(
                 &Column::builder().name("id").r#type("boolean").build()
@@ -394,6 +414,11 @@ mod tests {
             .unwrap(),
             Field::new("id", DataType::Boolean, true)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_map_binary_glue_column_to_arrow_field() -> Result<()> {
         assert_eq!(
             GlueCatalogProvider::map_glue_column_to_arrow_field(
                 &Column::builder().name("id").r#type("binary").build()
@@ -401,6 +426,11 @@ mod tests {
             .unwrap(),
             Field::new("id", DataType::Binary, true)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_map_timestamp_glue_column_to_arrow_field() -> Result<()> {
         assert_eq!(
             GlueCatalogProvider::map_glue_column_to_arrow_field(
                 &Column::builder().name("id").r#type("timestamp").build()
@@ -408,6 +438,11 @@ mod tests {
             .unwrap(),
             Field::new("id", DataType::Timestamp(Nanosecond, None), true)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_map_string_glue_column_to_arrow_field() -> Result<()> {
         assert_eq!(
             GlueCatalogProvider::map_glue_column_to_arrow_field(
                 &Column::builder().name("id").r#type("string").build()
@@ -415,6 +450,11 @@ mod tests {
             .unwrap(),
             Field::new("id", DataType::Utf8, true)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_map_decimal_glue_column_to_arrow_field() -> Result<()> {
         assert_eq!(
             GlueCatalogProvider::map_glue_column_to_arrow_field(
                 &Column::builder().name("id").r#type("decimal(12,9)").build()
@@ -422,6 +462,11 @@ mod tests {
             .unwrap(),
             Field::new("id", DataType::Decimal(12, 9), true)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_map_array_of_bigint_glue_column_to_arrow_field() -> Result<()> {
         assert_eq!(
             GlueCatalogProvider::map_glue_column_to_arrow_field(
                 &Column::builder().name("id").r#type("array<bigint>").build()
@@ -433,6 +478,11 @@ mod tests {
                 true
             )
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_map_array_of_int_glue_column_to_arrow_field() -> Result<()> {
         assert_eq!(
             GlueCatalogProvider::map_glue_column_to_arrow_field(
                 &Column::builder().name("id").r#type("array<int>").build()
@@ -444,6 +494,11 @@ mod tests {
                 true
             )
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_map_array_of_array_of_string_glue_column_to_arrow_field() -> Result<()> {
         assert_eq!(
             GlueCatalogProvider::map_glue_column_to_arrow_field(
                 &Column::builder()
@@ -462,6 +517,11 @@ mod tests {
                 true
             )
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_map_struct_of_int_and_int_glue_column_to_arrow_field() -> Result<()> {
         assert_eq!(
             GlueCatalogProvider::map_glue_column_to_arrow_field(
                 &Column::builder()
@@ -479,6 +539,11 @@ mod tests {
                 true
             )
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_map_map_of_string_and_boolean_glue_column_to_arrow_field() -> Result<()> {
         assert_eq!(
             GlueCatalogProvider::map_glue_column_to_arrow_field(
                 &Column::builder()
@@ -503,7 +568,12 @@ mod tests {
                 true
             )
         );
+        Ok(())
+    }
 
+    #[test]
+    fn test_map_map_of_string_and_map_of_string_and_boolean_glue_column_to_arrow_field(
+    ) -> Result<()> {
         assert_eq!(
             GlueCatalogProvider::map_glue_column_to_arrow_field(
                 &Column::builder()
