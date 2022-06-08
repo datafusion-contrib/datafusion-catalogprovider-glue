@@ -19,7 +19,6 @@ use crate::error::{GlueError, Result};
 use aws_sdk_glue::model::{Column, StorageDescriptor, Table};
 use aws_sdk_glue::Client;
 use aws_types::SdkConfig;
-use datafusion::arrow::datatypes::TimeUnit::Nanosecond;
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use datafusion::catalog::catalog::CatalogProvider;
 use datafusion::catalog::schema::{ObjectStoreSchemaProvider, SchemaProvider};
@@ -421,7 +420,7 @@ mod tests {
                 &Column::builder().name("id").r#type("timestamp").build()
             )
             .unwrap(),
-            Field::new("id", DataType::Timestamp(Nanosecond, None), true)
+            Field::new("id", DataType::Timestamp(TimeUnit::Nanosecond, None), true)
         );
         Ok(())
     }
@@ -655,7 +654,7 @@ mod tests {
             true)), true);
 
         // map type
-        assert_eq!(GlueCatalogProvider::map_glue_data_type("map<string,boolean>"), map_of_string_and_boolean.clone());
+        assert_eq!(GlueCatalogProvider::map_glue_data_type("map<string,boolean>"), map_of_string_and_boolean);
         assert_eq!(GlueCatalogProvider::map_glue_data_type("map<map<string,boolean>,array<string>>"), DataType::Map(Box::new(Field::new(
             "entries",
             DataType::Struct(vec![
@@ -676,6 +675,7 @@ mod tests {
 }
 
 use pest_derive::Parser;
+/// `GlueDataTypeParser` implementation for parsing glue datatype strings
 #[derive(Parser)]
 #[grammar = "glue_datatype.pest"]
-pub struct GlueDataTypeParser;
+struct GlueDataTypeParser;
