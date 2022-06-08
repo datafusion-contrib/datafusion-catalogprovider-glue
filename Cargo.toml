@@ -23,6 +23,8 @@ aws-types = "0.12.0"
 datafusion = { version = "8.0.0", features = ["avro"] }
 datafusion-objectstore-s3 = { version = "0.2.1" }
 lazy_static = "1.4.0"
+pest = "2.1"
+pest_derive = "2.1"
 regex = "1"
 tokio = { version = "1.18", features = ["macros", "rt", "rt-multi-thread", "sync", "fs"] }
 

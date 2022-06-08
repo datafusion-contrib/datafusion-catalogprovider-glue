@@ -1,0 +1,11 @@
+dataType = { simpleType | arrayType | mapType | structType }
+simpleType = { "int" | "boolean" | "bigint" | "float" | "double" | "binary" | "timestamp" | "string" }
+arrayType = { "array<" ~ dataType ~ ">" }
+mapType = { "map<" ~ dataType ~ "," ~ dataType ~ ">" }
+structType = { "struct<" ~ structFields ~ ">" }
+structFields = { structField ~ ("," ~ structField)* }
+structField = { ident ~ ":" ~ dataType }
+alpha = { 'a'..'z' | 'A'..'Z' }
+digit = { '0'..'9' }
+ident = { (alpha | digit)+ }
+

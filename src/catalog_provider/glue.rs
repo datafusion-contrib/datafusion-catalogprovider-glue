@@ -271,6 +271,9 @@ impl GlueCatalogProvider {
                     Ok(DataType::List(Box::new(field)))
                 } else if let Some(struct_cg) = STRUCT_RE.captures(glue_type) {
                     let field_list = struct_cg.name("field_list").unwrap().as_str();
+
+                    // need to do this better...
+
                     //println!("field list: {}", field_list);
                     let mut fields = Vec::new();
                     let pairs = field_list.split(',');
@@ -542,6 +545,32 @@ mod tests {
         Ok(())
     }
 
+    //struct<reply:struct<reply_id:int>>
+    //array<struct<reply:struct<reply_id:int,next_id:int>,blog_id:bigint>>
+
+    #[test]
+    fn test_map_struct_of_struct_of_int_glue_column_to_arrow_field() -> Result<()> {
+        assert_eq!(
+            GlueCatalogProvider::map_glue_column_to_arrow_field(
+                &Column::builder()
+                    .name("id")
+                    .r#type("struct<reply:struct<reply_id:int>>")
+                    .build()
+            )
+                .unwrap(),
+            Field::new(
+                "id",
+                DataType::Struct(vec![
+                    Field::new("reply", DataType::Struct(vec![
+                        Field::new("reply_id", DataType::Int32, true),
+                    ]), true),
+                ]),
+                true
+            )
+        );
+        Ok(())
+    }
+
     #[test]
     fn test_map_map_of_string_and_boolean_glue_column_to_arrow_field() -> Result<()> {
         assert_eq!(
@@ -615,4 +644,58 @@ mod tests {
 
         Ok(())
     }
+
+    /*
+    struct Tokenizer<I: Iterator<Item=char>>(lexers::Scanner<I>);
+
+    impl<I: Iterator<Item=char>> Iterator for Tokenizer<I> {
+        type Item = String;
+        fn next(&mut self) -> Option<Self::Item> {
+            self.0.scan_whitespace();
+            self.0.scan_math_op()
+                .or_else(|| self.0.scan_number())
+                .or_else(|| self.0.scan_identifier())
+        }
+    }
+
+    fn tokenizer<I: Iterator<Item=char>>(input: I) -> Tokenizer<I> {
+        Tokenizer(lexers::Scanner::new(input))
+    }*/
+
+    #[test]
+    fn test_parser() -> Result<()> {
+
+        use pest::Parser;
+
+        // simple types
+        assert!(GlueDataTypeParser::parse(Rule::dataType, "int").is_ok());
+        assert!(GlueDataTypeParser::parse(Rule::dataType, "boolean").is_ok());
+        assert!(GlueDataTypeParser::parse(Rule::dataType, "bigint").is_ok());
+        assert!(GlueDataTypeParser::parse(Rule::dataType, "float").is_ok());
+        assert!(GlueDataTypeParser::parse(Rule::dataType, "double").is_ok());
+        assert!(GlueDataTypeParser::parse(Rule::dataType, "binary").is_ok());
+        assert!(GlueDataTypeParser::parse(Rule::dataType, "timestamp").is_ok());
+        assert!(GlueDataTypeParser::parse(Rule::dataType, "string").is_ok());
+
+        // array type
+        assert!(GlueDataTypeParser::parse(Rule::dataType, "array<int>").is_ok());
+        assert!(GlueDataTypeParser::parse(Rule::dataType, "array<bigint>").is_ok());
+        assert!(GlueDataTypeParser::parse(Rule::dataType, "array<array<bigint>>").is_ok());
+
+        // map type
+        assert!(GlueDataTypeParser::parse(Rule::dataType, "map<int,int>").is_ok());
+        assert!(GlueDataTypeParser::parse(Rule::dataType, "map<int,map<string,array<int>>>").is_ok());
+        assert!(GlueDataTypeParser::parse(Rule::dataType, "map<map<string,array<int>>,array<timestamp>>").is_ok());
+
+        // struct type
+        assert!(GlueDataTypeParser::parse(Rule::dataType, "struct<id:int>").is_ok());
+        assert!(GlueDataTypeParser::parse(Rule::dataType, "struct<id:int,nm:map<int,bigint>,ns:struct<x:int>>").is_ok());
+
+        Ok(())
+    }
 }
+
+use pest_derive::Parser;
+#[derive(Parser)]
+#[grammar = "glue_datatype.pest"]
+pub struct GlueDataTypeParser;
