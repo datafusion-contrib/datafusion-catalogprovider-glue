@@ -756,6 +756,14 @@ mod tests {
                 Field::new("value", list_of_string, true),
             ]),
             true)), true));
+
+
+        let struct_of_int = DataType::Struct(vec![Field::new("reply_id", DataType::Int32, true)]);
+
+        // struct type
+        assert_eq!(map_glue_data_type("struct<reply_id:int>"), struct_of_int);
+        assert_eq!(map_glue_data_type("struct<reply:struct<reply_id:int>>"), DataType::Struct(vec![Field::new("reply", struct_of_int, true)]));
+
         Ok(())
     }
 
@@ -796,7 +804,17 @@ mod tests {
                     ]),
                     true)), true)
             },
-            //Rule::StructType => DataType::Binary,
+            Rule::StructType => {
+                let inner = pair.into_inner();
+                let fields = inner.map(|field| {
+                    let mut struct_field_inner = field.into_inner();
+                    let field_name = struct_field_inner.next().unwrap().as_str();
+                    let field_glue_data_type = struct_field_inner.next().unwrap().as_str();
+                    let field_arrow_data_type = map_glue_data_type(field_glue_data_type);
+                    Field::new(field_name, field_arrow_data_type, true)
+                }).collect();
+                DataType::Struct(fields)
+            },
             _ => {
                 println!("the rule is: {:?}", pair.as_rule());
                 unreachable!()

@@ -11,9 +11,9 @@ String = { "string" }
 ArrayType = { "array<" ~ DataType ~ ">" }
 MapType = { "map<" ~ DataType ~ "," ~ DataType ~ ">" }
 StructType = { "struct<" ~ structFields ~ ">" }
-structFields = { structField ~ ("," ~ structField)* }
+structFields = _{ structField ~ ("," ~ structField)* }
 structField = { ident ~ ":" ~ DataType }
-alpha = _{ 'a'..'z' | 'A'..'Z' }
+alpha = _{ 'a'..'z' | 'A'..'Z' | "_" | "-" }
 digit = _{ '0'..'9' }
 ident = { (alpha | digit)+ }
 
