@@ -14,7 +14,9 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+#![allow(missing_docs)]
 
-/// `CatalogProvider` implementation for Amazon AWS Glue
-pub mod glue;
-pub mod glue_data_type_parser;
+/// `GlueDataTypeParser` implementation for parsing glue datatype strings
+#[derive(pest_derive::Parser)]
+#[grammar = "glue_datatype.pest"]
+pub struct GlueDataTypeParser;

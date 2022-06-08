@@ -68,7 +68,7 @@ Run all linting:
 First clone the test data repository:
 
 ```bash
-git submodule update --init --recursive
+git submodule update --init --recursive .
 ```
 
 When this does not work:
