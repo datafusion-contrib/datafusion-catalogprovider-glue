@@ -891,7 +891,11 @@ mod tests {
         );
         assert_eq!(
             GlueCatalogProvider::map_glue_data_type("array<array<string>>").unwrap(),
-            DataType::List(Box::new(Field::new("element", list_of_string.clone(), true)))
+            DataType::List(Box::new(Field::new(
+                "element",
+                list_of_string.clone(),
+                true
+            )))
         );
 
         let map_of_string_and_boolean = DataType::Map(
