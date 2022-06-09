@@ -525,6 +525,18 @@ mod tests {
     }
 
     #[test]
+    fn test_map_integer_glue_column_to_arrow_field() -> Result<()> {
+        assert_eq!(
+            GlueCatalogProvider::map_glue_column_to_arrow_field(
+                &Column::builder().name("id").r#type("integer").build()
+            )
+                .unwrap(),
+            Field::new("id", DataType::Int32, true)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn test_map_bigint_glue_column_to_arrow_field() -> Result<()> {
         assert_eq!(
             GlueCatalogProvider::map_glue_column_to_arrow_field(
