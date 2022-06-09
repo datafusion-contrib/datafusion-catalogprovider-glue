@@ -25,6 +25,7 @@ use datafusion::catalog::catalog::CatalogProvider;
 use datafusion::catalog::schema::{ObjectStoreSchemaProvider, SchemaProvider};
 use datafusion::datasource::file_format::avro::AvroFormat;
 use datafusion::datasource::file_format::csv::CsvFormat;
+use datafusion::datasource::file_format::json::JsonFormat;
 use datafusion::datasource::file_format::parquet::ParquetFormat;
 use datafusion::datasource::file_format::FileFormat;
 use datafusion::datasource::listing::{ListingOptions, ListingTableConfig};
@@ -253,6 +254,21 @@ impl GlueCatalogProvider {
                 "org.apache.hadoop.hive.ql.io.avro.AvroContainerOutputFormat",
                 "org.apache.hadoop.hive.serde2.avro.AvroSerDe",
             ) => Ok(Box::new(AvroFormat::default())),
+            (
+                "org.apache.hadoop.mapred.TextInputFormat",
+                "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat",
+                "org.apache.hive.hcatalog.data.JsonSerDe",
+            ) => Ok(Box::new(JsonFormat::default())),
+            (
+                "org.apache.hadoop.mapred.TextInputFormat",
+                "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat",
+                "org.openx.data.jsonserde.JsonSerDe",
+            ) => Ok(Box::new(JsonFormat::default())),
+            (
+                "org.apache.hadoop.mapred.TextInputFormat",
+                "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat",
+                "com.amazon.ionhiveserde.IonHiveSerDe",
+            ) => Ok(Box::new(JsonFormat::default())),
             _ => Err(GlueError::NotImplemented(format!(
                 "No support for: {}, {}, {:?} yet.",
                 input_format, output_format, sd
