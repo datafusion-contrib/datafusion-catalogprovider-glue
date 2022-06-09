@@ -1,5 +1,5 @@
 DataType = _{ SimpleType | ArrayType | MapType | StructType }
-SimpleType = _{ TinyInt | SmallInt | Int | Boolean | BigInt | Float | Double | Binary | Timestamp | String | Char | Varchar | Decimal }
+SimpleType = _{ TinyInt | SmallInt | Int | Boolean | BigInt | Float | Double | Binary | Date | Timestamp | String | Char | Varchar | Decimal }
 TinyInt = { "tinyint" }
 SmallInt = { "smallint" }
 Int = { "int" | "integer" }
@@ -8,6 +8,7 @@ BigInt = { "bigint" }
 Float = { "float" }
 Double = { "double" }
 Binary = { "binary" }
+Date = { "date" }
 Timestamp = { "timestamp" }
 String = { "string" }
 Char = { "char" }

@@ -303,6 +303,7 @@ impl GlueCatalogProvider {
             Rule::String => Ok(DataType::Utf8),
             Rule::Char => Ok(DataType::Utf8),
             Rule::Varchar => Ok(DataType::Utf8),
+            Rule::Date => Ok(DataType::Date32),
             Rule::Decimal => {
                 let mut inner = pair.into_inner();
                 let precision = inner
@@ -530,7 +531,7 @@ mod tests {
             GlueCatalogProvider::map_glue_column_to_arrow_field(
                 &Column::builder().name("id").r#type("integer").build()
             )
-                .unwrap(),
+            .unwrap(),
             Field::new("id", DataType::Int32, true)
         );
         Ok(())
@@ -592,6 +593,18 @@ mod tests {
             )
             .unwrap(),
             Field::new("id", DataType::Binary, true)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_map_date_glue_column_to_arrow_field() -> Result<()> {
+        assert_eq!(
+            GlueCatalogProvider::map_glue_column_to_arrow_field(
+                &Column::builder().name("id").r#type("date").build()
+            )
+            .unwrap(),
+            Field::new("id", DataType::Date32, true)
         );
         Ok(())
     }
