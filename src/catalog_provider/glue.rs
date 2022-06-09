@@ -273,6 +273,7 @@ impl GlueCatalogProvider {
 
     /*
     https://docs.aws.amazon.com/glue/latest/dg/aws-glue-api-catalog-tables.html#aws-glue-api-catalog-tables-Column
+    https://docs.aws.amazon.com/athena/latest/ug/data-types.html
      */
 
     fn map_glue_data_type(glue_data_type: &str) -> Result<DataType> {
@@ -290,6 +291,8 @@ impl GlueCatalogProvider {
         })?;
 
         match pair.as_rule() {
+            Rule::TinyInt => Ok(DataType::Int8),
+            Rule::SmallInt => Ok(DataType::Int16),
             Rule::Int => Ok(DataType::Int32),
             Rule::Boolean => Ok(DataType::Boolean),
             Rule::BigInt => Ok(DataType::Int64),
@@ -298,6 +301,9 @@ impl GlueCatalogProvider {
             Rule::Binary => Ok(DataType::Binary),
             Rule::Timestamp => Ok(DataType::Timestamp(TimeUnit::Nanosecond, None)),
             Rule::String => Ok(DataType::Utf8),
+            Rule::Char => Ok(DataType::Utf8),
+            Rule::Varchar => Ok(DataType::Utf8),
+            Rule::Date => Ok(DataType::Date32),
             Rule::Decimal => {
                 let mut inner = pair.into_inner();
                 let precision = inner
@@ -347,7 +353,7 @@ impl GlueCatalogProvider {
                     .as_str();
                 let array_arrow_data_type = Self::map_glue_data_type(array_glue_data_type)?;
                 Ok(DataType::List(Box::new(Field::new(
-                    "id",
+                    "element",
                     array_arrow_data_type,
                     true,
                 ))))
@@ -378,7 +384,7 @@ impl GlueCatalogProvider {
 
                 Ok(DataType::Map(
                     Box::new(Field::new(
-                        "entries",
+                        "key_value",
                         DataType::Struct(vec![
                             Field::new("key", key_arrow_data_type, true),
                             Field::new("value", value_arrow_data_type, true),
@@ -484,10 +490,46 @@ mod tests {
     use datafusion::arrow::datatypes::TimeUnit;
 
     #[test]
+    fn test_map_tinyint_glue_column_to_arrow_field() -> Result<()> {
+        assert_eq!(
+            GlueCatalogProvider::map_glue_column_to_arrow_field(
+                &Column::builder().name("id").r#type("tinyint").build()
+            )
+            .unwrap(),
+            Field::new("id", DataType::Int8, true)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_map_smallint_glue_column_to_arrow_field() -> Result<()> {
+        assert_eq!(
+            GlueCatalogProvider::map_glue_column_to_arrow_field(
+                &Column::builder().name("id").r#type("smallint").build()
+            )
+            .unwrap(),
+            Field::new("id", DataType::Int16, true)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn test_map_int_glue_column_to_arrow_field() -> Result<()> {
         assert_eq!(
             GlueCatalogProvider::map_glue_column_to_arrow_field(
                 &Column::builder().name("id").r#type("int").build()
+            )
+            .unwrap(),
+            Field::new("id", DataType::Int32, true)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_map_integer_glue_column_to_arrow_field() -> Result<()> {
+        assert_eq!(
+            GlueCatalogProvider::map_glue_column_to_arrow_field(
+                &Column::builder().name("id").r#type("integer").build()
             )
             .unwrap(),
             Field::new("id", DataType::Int32, true)
@@ -556,6 +598,18 @@ mod tests {
     }
 
     #[test]
+    fn test_map_date_glue_column_to_arrow_field() -> Result<()> {
+        assert_eq!(
+            GlueCatalogProvider::map_glue_column_to_arrow_field(
+                &Column::builder().name("id").r#type("date").build()
+            )
+            .unwrap(),
+            Field::new("id", DataType::Date32, true)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn test_map_timestamp_glue_column_to_arrow_field() -> Result<()> {
         assert_eq!(
             GlueCatalogProvider::map_glue_column_to_arrow_field(
@@ -572,6 +626,30 @@ mod tests {
         assert_eq!(
             GlueCatalogProvider::map_glue_column_to_arrow_field(
                 &Column::builder().name("id").r#type("string").build()
+            )
+            .unwrap(),
+            Field::new("id", DataType::Utf8, true)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_map_char_glue_column_to_arrow_field() -> Result<()> {
+        assert_eq!(
+            GlueCatalogProvider::map_glue_column_to_arrow_field(
+                &Column::builder().name("id").r#type("char").build()
+            )
+            .unwrap(),
+            Field::new("id", DataType::Utf8, true)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_map_varchar_glue_column_to_arrow_field() -> Result<()> {
+        assert_eq!(
+            GlueCatalogProvider::map_glue_column_to_arrow_field(
+                &Column::builder().name("id").r#type("varchar").build()
             )
             .unwrap(),
             Field::new("id", DataType::Utf8, true)
@@ -600,7 +678,7 @@ mod tests {
             .unwrap(),
             Field::new(
                 "id",
-                DataType::List(Box::new(Field::new("id", DataType::Int64, true))),
+                DataType::List(Box::new(Field::new("element", DataType::Int64, true))),
                 true
             )
         );
@@ -616,7 +694,7 @@ mod tests {
             .unwrap(),
             Field::new(
                 "id",
-                DataType::List(Box::new(Field::new("id", DataType::Int32, true))),
+                DataType::List(Box::new(Field::new("element", DataType::Int32, true))),
                 true
             )
         );
@@ -636,8 +714,8 @@ mod tests {
             Field::new(
                 "id",
                 DataType::List(Box::new(Field::new(
-                    "id",
-                    DataType::List(Box::new(Field::new("id", DataType::Utf8, true))),
+                    "element",
+                    DataType::List(Box::new(Field::new("element", DataType::Utf8, true))),
                     true
                 ),)),
                 true
@@ -708,7 +786,7 @@ mod tests {
                 "id",
                 DataType::Map(
                     Box::new(Field::new(
-                        "entries",
+                        "key_value",
                         DataType::Struct(vec![
                             Field::new("key", DataType::Utf8, true),
                             Field::new("value", DataType::Boolean, true),
@@ -738,14 +816,14 @@ mod tests {
                 "id",
                 DataType::Map(
                     Box::new(Field::new(
-                        "entries",
+                        "key_value",
                         DataType::Struct(vec![
                             Field::new("key", DataType::Utf8, true),
                             Field::new(
                                 "value",
                                 DataType::Map(
                                     Box::new(Field::new(
-                                        "entries",
+                                        "key_value",
                                         DataType::Struct(vec![
                                             Field::new("key", DataType::Utf8, true),
                                             Field::new("value", DataType::Boolean, true),
@@ -804,7 +882,7 @@ mod tests {
             DataType::Utf8
         );
 
-        let list_of_string = DataType::List(Box::new(Field::new("id", DataType::Utf8, true)));
+        let list_of_string = DataType::List(Box::new(Field::new("element", DataType::Utf8, true)));
 
         // array type
         assert_eq!(
@@ -813,12 +891,16 @@ mod tests {
         );
         assert_eq!(
             GlueCatalogProvider::map_glue_data_type("array<array<string>>").unwrap(),
-            DataType::List(Box::new(Field::new("id", list_of_string.clone(), true)))
+            DataType::List(Box::new(Field::new(
+                "element",
+                list_of_string.clone(),
+                true
+            )))
         );
 
         let map_of_string_and_boolean = DataType::Map(
             Box::new(Field::new(
-                "entries",
+                "key_value",
                 DataType::Struct(vec![
                     Field::new("key", DataType::Utf8, true),
                     Field::new("value", DataType::Boolean, true),
@@ -838,7 +920,7 @@ mod tests {
                 .unwrap(),
             DataType::Map(
                 Box::new(Field::new(
-                    "entries",
+                    "key_value",
                     DataType::Struct(vec![
                         Field::new("key", map_of_string_and_boolean, true),
                         Field::new("value", list_of_string, true),

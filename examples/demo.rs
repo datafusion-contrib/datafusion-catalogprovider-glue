@@ -28,23 +28,11 @@ async fn main() -> Result<()> {
 
     let mut glue_catalog_provider = GlueCatalogProvider::default().await;
 
-    /*
-    let databases = vec!["datafusion", "datafusion_testing"];
-    for database in databases {
-        let register_results = glue_catalog_provider.register_tables(database).await?;
-        for result in register_results {
-            if result.is_err() {
-                // only output tables which were not registered...
-                println!("{}", result.err().unwrap());
-            }
-        }
-    }*/
-
     let register_results = glue_catalog_provider.register_all().await?;
     for result in register_results {
         if result.is_err() {
             // only output tables which were not registered...
-            println!("{}", result.err().unwrap());
+            println!("{:?}", result);
         }
     }
 
@@ -62,6 +50,10 @@ async fn main() -> Result<()> {
     from information_schema.tables
     where table_catalog='glue'
     and table_schema <> 'information_schema'
+    and table_schema <> 'datafusion_delta'
+    and table_name <> 'parquet_testing_nullable_impala_parquet'
+    and table_name <> 'parquet_testing_nonnullable_impala_parquet'
+    and table_name <> 'parquet_testing_nested_lists_snappy_parquet'
     "#,
         )
         .await?
