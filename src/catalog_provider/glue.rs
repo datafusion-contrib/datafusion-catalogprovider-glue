@@ -353,7 +353,7 @@ impl GlueCatalogProvider {
                     .as_str();
                 let array_arrow_data_type = Self::map_glue_data_type(array_glue_data_type)?;
                 Ok(DataType::List(Box::new(Field::new(
-                    "id",
+                    "element",
                     array_arrow_data_type,
                     true,
                 ))))
@@ -678,7 +678,7 @@ mod tests {
             .unwrap(),
             Field::new(
                 "id",
-                DataType::List(Box::new(Field::new("id", DataType::Int64, true))),
+                DataType::List(Box::new(Field::new("element", DataType::Int64, true))),
                 true
             )
         );
@@ -694,7 +694,7 @@ mod tests {
             .unwrap(),
             Field::new(
                 "id",
-                DataType::List(Box::new(Field::new("id", DataType::Int32, true))),
+                DataType::List(Box::new(Field::new("element", DataType::Int32, true))),
                 true
             )
         );
@@ -714,8 +714,8 @@ mod tests {
             Field::new(
                 "id",
                 DataType::List(Box::new(Field::new(
-                    "id",
-                    DataType::List(Box::new(Field::new("id", DataType::Utf8, true))),
+                    "element",
+                    DataType::List(Box::new(Field::new("element", DataType::Utf8, true))),
                     true
                 ),)),
                 true
@@ -882,7 +882,7 @@ mod tests {
             DataType::Utf8
         );
 
-        let list_of_string = DataType::List(Box::new(Field::new("id", DataType::Utf8, true)));
+        let list_of_string = DataType::List(Box::new(Field::new("element", DataType::Utf8, true)));
 
         // array type
         assert_eq!(
@@ -891,7 +891,7 @@ mod tests {
         );
         assert_eq!(
             GlueCatalogProvider::map_glue_data_type("array<array<string>>").unwrap(),
-            DataType::List(Box::new(Field::new("id", list_of_string.clone(), true)))
+            DataType::List(Box::new(Field::new("element", list_of_string.clone(), true)))
         );
 
         let map_of_string_and_boolean = DataType::Map(
