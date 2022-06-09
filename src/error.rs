@@ -31,6 +31,8 @@ pub enum GlueError {
     AWS(String),
     /// Wrapper for datafusion errors
     DataFusion(DataFusionError),
+    /// Error during mapping of GlueDataType
+    GlueDataTypeMapping(String),
 }
 
 impl Display for GlueError {
@@ -39,6 +41,9 @@ impl Display for GlueError {
             GlueError::NotImplemented(desc) => write!(f, "Not yet implemented: {}", desc),
             GlueError::AWS(desc) => write!(f, "AWS error: {}", desc),
             GlueError::DataFusion(e) => e.fmt(f),
+            GlueError::GlueDataTypeMapping(desc) => {
+                write!(f, "Could not map glue data type: {}", desc)
+            }
         }
     }
 }

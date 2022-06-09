@@ -27,6 +27,19 @@ async fn main() -> Result<()> {
     let ctx = SessionContext::with_config(config);
 
     let mut glue_catalog_provider = GlueCatalogProvider::default().await;
+
+    /*
+    let databases = vec!["datafusion", "datafusion_testing"];
+    for database in databases {
+        let register_results = glue_catalog_provider.register_tables(database).await?;
+        for result in register_results {
+            if result.is_err() {
+                // only output tables which were not registered...
+                println!("{}", result.err().unwrap());
+            }
+        }
+    }*/
+
     let register_results = glue_catalog_provider.register_all().await?;
     for result in register_results {
         if result.is_err() {
@@ -42,7 +55,15 @@ async fn main() -> Result<()> {
         .show()
         .await?;
 
-    let tables = ctx.sql("select table_schema, table_name from information_schema.tables where table_catalog='glue'")
+    let tables = ctx
+        .sql(
+            r#"
+    select table_schema, table_name
+    from information_schema.tables
+    where table_catalog='glue'
+    and table_schema <> 'information_schema'
+    "#,
+        )
         .await?
         .collect()
         .await?;

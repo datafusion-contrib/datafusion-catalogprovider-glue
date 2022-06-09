@@ -69,7 +69,7 @@ impl GlueCatalogProvider {
             .send()
             .await?
             .table
-            .unwrap();
+            .ok_or_else(|| GlueError::AWS(format!("Did not find table {}.{}", database, table)))?;
 
         self.register_glue_table(&glue_table).await
     }
@@ -83,7 +83,9 @@ impl GlueCatalogProvider {
             .send()
             .await?
             .table_list
-            .unwrap();
+            .ok_or_else(|| {
+                GlueError::AWS(format!("Did not find table list in database {}", database))
+            })?;
 
         let mut results = Vec::new();
         for glue_table in glue_tables {
@@ -102,18 +104,23 @@ impl GlueCatalogProvider {
             .send()
             .await?
             .database_list
-            .unwrap();
+            .ok_or_else(|| GlueError::AWS("Did not find database list".to_string()))?;
 
         let mut results = Vec::new();
         for glue_database in glue_databases {
+            let database = glue_database
+                .name
+                .ok_or_else(|| GlueError::AWS("Failed to find name for database".to_string()))?;
             let glue_tables = self
                 .client
                 .get_tables()
-                .database_name(glue_database.name.unwrap())
+                .database_name(&database)
                 .send()
                 .await?
                 .table_list
-                .unwrap();
+                .ok_or_else(|| {
+                    GlueError::AWS(format!("Did not find table list in database {}", database))
+                })?;
 
             for glue_table in glue_tables {
                 let result = self.register_glue_table(&glue_table).await;
@@ -125,9 +132,11 @@ impl GlueCatalogProvider {
     }
 
     async fn register_glue_table(&mut self, glue_table: &Table) -> Result<()> {
-        let database_name = glue_table.database_name.as_ref().unwrap().clone();
-
-        //let mut schema_provider_by_database = self.schema_provider_by_database;
+        let database_name = glue_table
+            .database_name
+            .as_ref()
+            .ok_or_else(|| GlueError::AWS("Failed to find name for glue database".to_string()))?
+            .clone();
 
         let schema_provider_for_database = self
             .schema_provider_by_database
@@ -138,12 +147,24 @@ impl GlueCatalogProvider {
                 Arc::new(instance)
             });
 
-        let table_name = glue_table.name.as_deref().unwrap();
-        let sd = glue_table.storage_descriptor.as_ref().unwrap();
-        let uri = sd.location.as_ref().unwrap();
+        let table_name = glue_table
+            .name
+            .as_deref()
+            .ok_or_else(|| GlueError::AWS("Failed to find name for glue table".to_string()))?;
+        let sd = glue_table.storage_descriptor.as_ref().ok_or_else(|| {
+            GlueError::AWS("Failed to find storage descriptor for glue table".to_string())
+        })?;
+        let uri = sd.location.as_ref().ok_or_else(|| {
+            GlueError::AWS("Failed to find uri in storage descriptor for glue table".to_string())
+        })?;
         let (object_store, path) = schema_provider_for_database.object_store(uri)?;
         let mut ltc = ListingTableConfig::new(object_store, path);
-        let schema = Self::map_glue_columns_to_arrow_schema(sd.columns.as_ref().unwrap())
+        let schema =
+            Self::map_glue_columns_to_arrow_schema(sd.columns.as_ref().ok_or_else(|| {
+                GlueError::AWS(
+                    "Failed to find columns in storage descriptor for glue table".to_string(),
+                )
+            })?)
             .map_err(|e| Self::wrap_error_with_table_info(&database_name, table_name, e))?;
         let schema_ref = SchemaRef::new(schema);
         ltc = ltc.with_schema(schema_ref);
@@ -170,14 +191,28 @@ impl GlueCatalogProvider {
     }
 
     fn calculate_options(sd: &StorageDescriptor) -> Result<ListingOptions> {
-        //println!("need to calculate options for {:?}", sd);
-
         let empty_str = String::from("");
         let input_format = sd.input_format.as_ref().unwrap_or(&empty_str);
         let output_format = sd.output_format.as_ref().unwrap_or(&empty_str);
-        let serde_info = sd.serde_info.as_ref().unwrap();
-        let serialization_library = serde_info.serialization_library().unwrap_or_default();
-        let serde_info_parameters = serde_info.parameters.as_ref().unwrap().clone();
+        let serde_info = sd.serde_info.as_ref().ok_or_else(|| {
+            GlueError::AWS(
+                "Failed to find serde_info in storage descriptor for glue table".to_string(),
+            )
+        })?;
+        let serialization_library = serde_info
+            .serialization_library
+            .as_ref()
+            .unwrap_or(&empty_str);
+        let serde_info_parameters = serde_info
+            .parameters
+            .as_ref()
+            .ok_or_else(|| {
+                GlueError::AWS(
+                    "Failed to find parameters of serde_info in storage descriptor for glue table"
+                        .to_string(),
+                )
+            })?
+            .clone();
         let sd_parameters = match &sd.parameters {
             Some(x) => x.clone(),
             None => HashMap::new(),
@@ -196,7 +231,14 @@ impl GlueCatalogProvider {
                 "org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe",
             ) => {
                 let mut format = CsvFormat::default();
-                let delim = serde_info_parameters.get("field.delim").unwrap().as_bytes();
+                let delim = serde_info_parameters
+                    .get("field.delim")
+                    .ok_or_else(|| {
+                        GlueError::AWS(
+                            "Failed to find field.delim in serde_info parameters".to_string(),
+                        )
+                    })?
+                    .as_bytes();
                 let delim_char = delim[0];
                 format = format.with_delimiter(delim_char);
                 let has_header = sd_parameters
@@ -229,40 +271,112 @@ impl GlueCatalogProvider {
         Ok(listing_options)
     }
 
-    fn map_glue_data_type(glue_data_type: &str) -> DataType {
+    /*
+    https://docs.aws.amazon.com/glue/latest/dg/aws-glue-api-catalog-tables.html#aws-glue-api-catalog-tables-Column
+     */
+
+    fn map_glue_data_type(glue_data_type: &str) -> Result<DataType> {
         use pest::Parser;
-        let mut pairs = GlueDataTypeParser::parse(Rule::DataType, glue_data_type).unwrap();
-        let pair = pairs.next().unwrap();
+
+        let mut pairs = GlueDataTypeParser::parse(Rule::DataType, glue_data_type).map_err(|e| {
+            GlueError::GlueDataTypeMapping(format!(
+                "Error while parsing {}: {:?}",
+                glue_data_type, e
+            ))
+        })?;
+
+        let pair = pairs.next().ok_or_else(|| {
+            GlueError::GlueDataTypeMapping("Did not find actual type in DataType".to_string())
+        })?;
 
         match pair.as_rule() {
-            Rule::Int => DataType::Int32,
-            Rule::Boolean => DataType::Boolean,
-            Rule::BigInt => DataType::Int64,
-            Rule::Float => DataType::Float32,
-            Rule::Double => DataType::Float64,
-            Rule::Binary => DataType::Binary,
-            Rule::Timestamp => DataType::Timestamp(TimeUnit::Nanosecond, None),
-            Rule::String => DataType::Utf8,
+            Rule::Int => Ok(DataType::Int32),
+            Rule::Boolean => Ok(DataType::Boolean),
+            Rule::BigInt => Ok(DataType::Int64),
+            Rule::Float => Ok(DataType::Float32),
+            Rule::Double => Ok(DataType::Float64),
+            Rule::Binary => Ok(DataType::Binary),
+            Rule::Timestamp => Ok(DataType::Timestamp(TimeUnit::Nanosecond, None)),
+            Rule::String => Ok(DataType::Utf8),
             Rule::Decimal => {
                 let mut inner = pair.into_inner();
-                let precision = inner.next().unwrap().as_str().parse().unwrap();
-                let scale = inner.next().unwrap().as_str().parse().unwrap();
-                DataType::Decimal(precision, scale)
+                let precision = inner
+                    .next()
+                    .ok_or_else(|| {
+                        GlueError::GlueDataTypeMapping(format!(
+                            "Did not find precision in {:?}",
+                            glue_data_type
+                        ))
+                    })?
+                    .as_str()
+                    .parse()
+                    .map_err(|_| {
+                        GlueError::GlueDataTypeMapping(format!(
+                            "Failed to parse precision as usize in {:?}",
+                            glue_data_type
+                        ))
+                    })?;
+                let scale = inner
+                    .next()
+                    .ok_or_else(|| {
+                        GlueError::GlueDataTypeMapping(format!(
+                            "Did not find scale in {:?}",
+                            glue_data_type
+                        ))
+                    })?
+                    .as_str()
+                    .parse()
+                    .map_err(|_| {
+                        GlueError::GlueDataTypeMapping(format!(
+                            "Failed to parse scale as usize in {:?}",
+                            glue_data_type
+                        ))
+                    })?;
+                Ok(DataType::Decimal(precision, scale))
             }
             Rule::ArrayType => {
-                let array_glue_data_type = pair.into_inner().next().unwrap().as_str();
-                let array_arrow_data_type = Self::map_glue_data_type(array_glue_data_type);
-                DataType::List(Box::new(Field::new("id", array_arrow_data_type, true)))
+                let array_glue_data_type = pair
+                    .into_inner()
+                    .next()
+                    .ok_or_else(|| {
+                        GlueError::GlueDataTypeMapping(format!(
+                            "Did not find array type in {:?}",
+                            glue_data_type
+                        ))
+                    })?
+                    .as_str();
+                let array_arrow_data_type = Self::map_glue_data_type(array_glue_data_type)?;
+                Ok(DataType::List(Box::new(Field::new(
+                    "id",
+                    array_arrow_data_type,
+                    true,
+                ))))
             }
             Rule::MapType => {
                 let mut inner = pair.into_inner();
-                let key_glue_data_type = inner.next().unwrap().as_str();
-                let value_glue_data_type = inner.next().unwrap().as_str();
+                let key_glue_data_type = inner
+                    .next()
+                    .ok_or_else(|| {
+                        GlueError::GlueDataTypeMapping(format!(
+                            "Did not key data type in {:?}",
+                            glue_data_type
+                        ))
+                    })?
+                    .as_str();
+                let value_glue_data_type = inner
+                    .next()
+                    .ok_or_else(|| {
+                        GlueError::GlueDataTypeMapping(format!(
+                            "Did not find value data type in {:?}",
+                            glue_data_type
+                        ))
+                    })?
+                    .as_str();
 
-                let key_arrow_data_type = Self::map_glue_data_type(key_glue_data_type);
-                let value_arrow_data_type = Self::map_glue_data_type(value_glue_data_type);
+                let key_arrow_data_type = Self::map_glue_data_type(key_glue_data_type)?;
+                let value_arrow_data_type = Self::map_glue_data_type(value_glue_data_type)?;
 
-                DataType::Map(
+                Ok(DataType::Map(
                     Box::new(Field::new(
                         "entries",
                         DataType::Struct(vec![
@@ -272,43 +386,59 @@ impl GlueCatalogProvider {
                         true,
                     )),
                     true,
-                )
+                ))
             }
             Rule::StructType => {
                 let inner = pair.into_inner();
-                let fields = inner
-                    .map(|field| {
-                        let mut struct_field_inner = field.into_inner();
-                        let field_name = struct_field_inner.next().unwrap().as_str();
-                        let field_glue_data_type = struct_field_inner.next().unwrap().as_str();
-                        let field_arrow_data_type = Self::map_glue_data_type(field_glue_data_type);
-                        Field::new(field_name, field_arrow_data_type, true)
-                    })
-                    .collect();
-                DataType::Struct(fields)
+                let mut fields = Vec::new();
+                for field in inner {
+                    let mut struct_field_inner = field.into_inner();
+                    let field_name = struct_field_inner
+                        .next()
+                        .ok_or_else(|| {
+                            GlueError::GlueDataTypeMapping(format!(
+                                "Did not find field name in {:?}",
+                                glue_data_type
+                            ))
+                        })?
+                        .as_str();
+                    let field_glue_data_type = struct_field_inner
+                        .next()
+                        .ok_or_else(|| {
+                            GlueError::GlueDataTypeMapping(format!(
+                                "Did not find field data type in {:?}",
+                                glue_data_type
+                            ))
+                        })?
+                        .as_str();
+                    let field_arrow_data_type = Self::map_glue_data_type(field_glue_data_type)?;
+                    fields.push(Field::new(field_name, field_arrow_data_type, true));
+                }
+                Ok(DataType::Struct(fields))
             }
-            _ => {
-                println!("the rule is: {:?}", pair.as_rule());
-                unreachable!()
-            }
+            _ => Err(GlueError::NotImplemented(format!(
+                "No arrow type for glue_data_type: {}",
+                &glue_data_type
+            ))),
         }
     }
 
-    /*
-    https://docs.aws.amazon.com/glue/latest/dg/aws-glue-api-catalog-tables.html#aws-glue-api-catalog-tables-Column
-     */
-    fn map_glue_type_to_arrow_data_type(_: &str, glue_type: &str) -> Result<DataType> {
-        Ok(Self::map_glue_data_type(glue_type))
-    }
-
     fn map_glue_column_to_arrow_field(glue_column: &Column) -> Result<Field> {
-        let name = glue_column.name.as_ref().unwrap().clone();
-        let glue_type = glue_column.r#type.as_ref().unwrap().clone();
+        let name = glue_column
+            .name
+            .as_ref()
+            .ok_or_else(|| GlueError::AWS("Failed to find name in glue column".to_string()))?
+            .clone();
+        let glue_type = glue_column
+            .r#type
+            .as_ref()
+            .ok_or_else(|| GlueError::AWS("Failed to find type in glue column".to_string()))?
+            .clone();
         Self::map_to_arrow_field(&name, &glue_type)
     }
 
     fn map_to_arrow_field(glue_name: &str, glue_type: &str) -> Result<Field> {
-        let arrow_data_type = Self::map_glue_type_to_arrow_data_type(glue_name, glue_type)?;
+        let arrow_data_type = Self::map_glue_data_type(glue_type)?;
         Ok(Field::new(glue_name, arrow_data_type, true))
     }
 
@@ -642,35 +772,35 @@ mod tests {
     fn test_map_glue_data_type() -> Result<()> {
         // simple types
         assert_eq!(
-            GlueCatalogProvider::map_glue_data_type("int"),
+            GlueCatalogProvider::map_glue_data_type("int").unwrap(),
             DataType::Int32
         );
         assert_eq!(
-            GlueCatalogProvider::map_glue_data_type("boolean"),
+            GlueCatalogProvider::map_glue_data_type("boolean").unwrap(),
             DataType::Boolean
         );
         assert_eq!(
-            GlueCatalogProvider::map_glue_data_type("bigint"),
+            GlueCatalogProvider::map_glue_data_type("bigint").unwrap(),
             DataType::Int64
         );
         assert_eq!(
-            GlueCatalogProvider::map_glue_data_type("float"),
+            GlueCatalogProvider::map_glue_data_type("float").unwrap(),
             DataType::Float32
         );
         assert_eq!(
-            GlueCatalogProvider::map_glue_data_type("double"),
+            GlueCatalogProvider::map_glue_data_type("double").unwrap(),
             DataType::Float64
         );
         assert_eq!(
-            GlueCatalogProvider::map_glue_data_type("binary"),
+            GlueCatalogProvider::map_glue_data_type("binary").unwrap(),
             DataType::Binary
         );
         assert_eq!(
-            GlueCatalogProvider::map_glue_data_type("timestamp"),
+            GlueCatalogProvider::map_glue_data_type("timestamp").unwrap(),
             DataType::Timestamp(TimeUnit::Nanosecond, None)
         );
         assert_eq!(
-            GlueCatalogProvider::map_glue_data_type("string"),
+            GlueCatalogProvider::map_glue_data_type("string").unwrap(),
             DataType::Utf8
         );
 
@@ -678,11 +808,11 @@ mod tests {
 
         // array type
         assert_eq!(
-            GlueCatalogProvider::map_glue_data_type("array<string>"),
+            GlueCatalogProvider::map_glue_data_type("array<string>").unwrap(),
             list_of_string
         );
         assert_eq!(
-            GlueCatalogProvider::map_glue_data_type("array<array<string>>"),
+            GlueCatalogProvider::map_glue_data_type("array<array<string>>").unwrap(),
             DataType::List(Box::new(Field::new("id", list_of_string.clone(), true)))
         );
 
@@ -700,11 +830,12 @@ mod tests {
 
         // map type
         assert_eq!(
-            GlueCatalogProvider::map_glue_data_type("map<string,boolean>"),
+            GlueCatalogProvider::map_glue_data_type("map<string,boolean>").unwrap(),
             map_of_string_and_boolean
         );
         assert_eq!(
-            GlueCatalogProvider::map_glue_data_type("map<map<string,boolean>,array<string>>"),
+            GlueCatalogProvider::map_glue_data_type("map<map<string,boolean>,array<string>>")
+                .unwrap(),
             DataType::Map(
                 Box::new(Field::new(
                     "entries",
@@ -722,16 +853,16 @@ mod tests {
 
         // struct type
         assert_eq!(
-            GlueCatalogProvider::map_glue_data_type("struct<reply_id:int>"),
+            GlueCatalogProvider::map_glue_data_type("struct<reply_id:int>").unwrap(),
             struct_of_int
         );
         assert_eq!(
-            GlueCatalogProvider::map_glue_data_type("struct<reply:struct<reply_id:int>>"),
+            GlueCatalogProvider::map_glue_data_type("struct<reply:struct<reply_id:int>>").unwrap(),
             DataType::Struct(vec![Field::new("reply", struct_of_int, true)])
         );
 
         assert_eq!(
-            GlueCatalogProvider::map_glue_data_type("decimal(12,9)"),
+            GlueCatalogProvider::map_glue_data_type("decimal(12,9)").unwrap(),
             DataType::Decimal(12, 9)
         );
 
