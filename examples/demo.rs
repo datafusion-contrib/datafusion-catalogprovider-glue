@@ -72,6 +72,7 @@ async fn main() -> Result<()> {
 }
 
 async fn sample(ctx: SessionContext, schema: &str, table: &str, limit: usize) -> Result<()> {
+    println!("sampling glue.{}.{}", schema, table);
     ctx.sql(&format!("select * from glue.{}.{}", schema, table))
         .await?
         .show_limit(limit)
