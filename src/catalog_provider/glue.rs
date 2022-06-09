@@ -384,7 +384,7 @@ impl GlueCatalogProvider {
 
                 Ok(DataType::Map(
                     Box::new(Field::new(
-                        "entries",
+                        "key_value",
                         DataType::Struct(vec![
                             Field::new("key", key_arrow_data_type, true),
                             Field::new("value", value_arrow_data_type, true),
@@ -786,7 +786,7 @@ mod tests {
                 "id",
                 DataType::Map(
                     Box::new(Field::new(
-                        "entries",
+                        "key_value",
                         DataType::Struct(vec![
                             Field::new("key", DataType::Utf8, true),
                             Field::new("value", DataType::Boolean, true),
@@ -816,14 +816,14 @@ mod tests {
                 "id",
                 DataType::Map(
                     Box::new(Field::new(
-                        "entries",
+                        "key_value",
                         DataType::Struct(vec![
                             Field::new("key", DataType::Utf8, true),
                             Field::new(
                                 "value",
                                 DataType::Map(
                                     Box::new(Field::new(
-                                        "entries",
+                                        "key_value",
                                         DataType::Struct(vec![
                                             Field::new("key", DataType::Utf8, true),
                                             Field::new("value", DataType::Boolean, true),
@@ -896,7 +896,7 @@ mod tests {
 
         let map_of_string_and_boolean = DataType::Map(
             Box::new(Field::new(
-                "entries",
+                "key_value",
                 DataType::Struct(vec![
                     Field::new("key", DataType::Utf8, true),
                     Field::new("value", DataType::Boolean, true),
@@ -916,7 +916,7 @@ mod tests {
                 .unwrap(),
             DataType::Map(
                 Box::new(Field::new(
-                    "entries",
+                    "key_value",
                     DataType::Struct(vec![
                         Field::new("key", map_of_string_and_boolean, true),
                         Field::new("value", list_of_string, true),
