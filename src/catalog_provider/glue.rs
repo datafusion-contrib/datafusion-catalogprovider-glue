@@ -257,10 +257,18 @@ impl GlueCatalogProvider {
             (
                 "org.apache.hadoop.mapred.TextInputFormat",
                 "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat",
+                "org.apache.hive.hcatalog.data.JsonSerDe",
+            ) => Ok(Box::new(JsonFormat::default())),
+            (
+                "org.apache.hadoop.mapred.TextInputFormat",
+                "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat",
                 "org.openx.data.jsonserde.JsonSerDe",
-            ) => {
-                Ok(Box::new(JsonFormat::default()))
-            }
+            ) => Ok(Box::new(JsonFormat::default())),
+            (
+                "org.apache.hadoop.mapred.TextInputFormat",
+                "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat",
+                "com.amazon.ionhiveserde.IonHiveSerDe",
+            ) => Ok(Box::new(JsonFormat::default())),
             _ => Err(GlueError::NotImplemented(format!(
                 "No support for: {}, {}, {:?} yet.",
                 input_format, output_format, sd
