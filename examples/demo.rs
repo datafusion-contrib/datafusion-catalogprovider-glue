@@ -28,6 +28,7 @@ async fn main() -> Result<()> {
 
     let mut glue_catalog_provider = GlueCatalogProvider::default().await;
 
+    /*
     let databases = vec!["datafusion", "datafusion_testing"];
     for database in databases {
         let register_results = glue_catalog_provider.register_tables(database).await?;
@@ -36,6 +37,14 @@ async fn main() -> Result<()> {
                 // only output tables which were not registered...
                 println!("{}", result.err().unwrap());
             }
+        }
+    }*/
+
+    let register_results = glue_catalog_provider.register_all().await?;
+    for result in register_results {
+        if result.is_err() {
+            // only output tables which were not registered...
+            println!("{}", result.err().unwrap());
         }
     }
 
