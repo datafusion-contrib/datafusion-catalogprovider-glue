@@ -42,7 +42,7 @@ async fn main() -> Result<()> {
         .show()
         .await?;
 
-    let tables = ctx.sql("select table_schema, table_name from information_schema.tables where table_catalog='glue' and table_schema like 'datafusion%'")
+    let tables = ctx.sql("select table_schema, table_name from information_schema.tables where table_catalog='glue'")
         .await?
         .collect()
         .await?;
