@@ -25,6 +25,7 @@ use datafusion::catalog::catalog::CatalogProvider;
 use datafusion::catalog::schema::{ObjectStoreSchemaProvider, SchemaProvider};
 use datafusion::datasource::file_format::avro::AvroFormat;
 use datafusion::datasource::file_format::csv::CsvFormat;
+use datafusion::datasource::file_format::json::JsonFormat;
 use datafusion::datasource::file_format::parquet::ParquetFormat;
 use datafusion::datasource::file_format::FileFormat;
 use datafusion::datasource::listing::{ListingOptions, ListingTableConfig};
@@ -32,7 +33,6 @@ use datafusion_objectstore_s3::object_store::s3::S3FileSystem;
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
-use datafusion::datasource::file_format::json::JsonFormat;
 
 /// `CatalogProvider` implementation for the Amazon Glue API
 pub struct GlueCatalogProvider {
