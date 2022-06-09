@@ -48,6 +48,25 @@ registering tpc-h-parquet-1.customer
 
 ```
 
+## Known issues
+
+* Not possible to infer whether a column is nullable or not. Currently we default to true.
+```
+  failed to sample datafusion.parquet_testing_datapage_v2_snappy_parquet due to Arrow error: External error: Execution error: Failed to map column projection for field e. Incompatible data types List(Field { name: "element", data_type: Int32, nullable: false, dict_id: 0, dict_is_ordered: false, metadata: None }) and List(Field { name: "element", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: None })
+```
+* Sometimes datafusion infers a column to be of type Time32(Millisecond) instead of Timestamp(Nanosecond, None)
+```
+failed to sample datafusion.parquet_testing_encrypt_columns_plaintext_footer_parquet_encrypted due to Arrow error: External error: Execution error: Failed to map column projection for field int32_field. Incompatible data types Time32(Millisecond) and Timestamp(Nanosecond, None)
+```
+* Not possible to infer that a column is empty (and then gets data_type: Null)
+```
+failed to sample datafusion.parquet_testing_null_list_parquet due to Arrow error: External error: Execution error: Failed to map column projection for field emptylist. Incompatible data types List(Field { name: "item", data_type: Null, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: None }) and List(Field { name: "element", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: None })
+```
+* Not possible to infer that a column is unsigned or signed
+```
+failed to sample datafusion.parquet_testing_nested_structs_rust_parquet due to Arrow error: External error: Execution error: Failed to map column projection for field roll_num. Incompatible data types 
+```
+
 ## Development
 
 Standard rust toolchain, eg:
