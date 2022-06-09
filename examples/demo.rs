@@ -62,8 +62,6 @@ async fn main() -> Result<()> {
     from information_schema.tables
     where table_catalog='glue'
     and table_schema <> 'information_schema'
-    and table_name <> 'parquet_testing_nonnullable_impala_parquet'
-    and table_name <> 'parquet_testing_nested_lists_snappy_parquet'
     "#,
         )
         .await?
