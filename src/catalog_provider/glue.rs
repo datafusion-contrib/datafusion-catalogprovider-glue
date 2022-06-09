@@ -229,40 +229,48 @@ impl GlueCatalogProvider {
         Ok(listing_options)
     }
 
-    fn map_glue_data_type(glue_data_type: &str) -> DataType {
+    /*
+    https://docs.aws.amazon.com/glue/latest/dg/aws-glue-api-catalog-tables.html#aws-glue-api-catalog-tables-Column
+     */
+
+    fn map_glue_data_type(glue_data_type: &str) -> Result<DataType> {
         use pest::Parser;
         let mut pairs = GlueDataTypeParser::parse(Rule::DataType, glue_data_type).unwrap();
         let pair = pairs.next().unwrap();
 
         match pair.as_rule() {
-            Rule::Int => DataType::Int32,
-            Rule::Boolean => DataType::Boolean,
-            Rule::BigInt => DataType::Int64,
-            Rule::Float => DataType::Float32,
-            Rule::Double => DataType::Float64,
-            Rule::Binary => DataType::Binary,
-            Rule::Timestamp => DataType::Timestamp(TimeUnit::Nanosecond, None),
-            Rule::String => DataType::Utf8,
+            Rule::Int => Ok(DataType::Int32),
+            Rule::Boolean => Ok(DataType::Boolean),
+            Rule::BigInt => Ok(DataType::Int64),
+            Rule::Float => Ok(DataType::Float32),
+            Rule::Double => Ok(DataType::Float64),
+            Rule::Binary => Ok(DataType::Binary),
+            Rule::Timestamp => Ok(DataType::Timestamp(TimeUnit::Nanosecond, None)),
+            Rule::String => Ok(DataType::Utf8),
             Rule::Decimal => {
                 let mut inner = pair.into_inner();
                 let precision = inner.next().unwrap().as_str().parse().unwrap();
                 let scale = inner.next().unwrap().as_str().parse().unwrap();
-                DataType::Decimal(precision, scale)
+                Ok(DataType::Decimal(precision, scale))
             }
             Rule::ArrayType => {
                 let array_glue_data_type = pair.into_inner().next().unwrap().as_str();
-                let array_arrow_data_type = Self::map_glue_data_type(array_glue_data_type);
-                DataType::List(Box::new(Field::new("id", array_arrow_data_type, true)))
+                let array_arrow_data_type = Self::map_glue_data_type(array_glue_data_type)?;
+                Ok(DataType::List(Box::new(Field::new(
+                    "id",
+                    array_arrow_data_type,
+                    true,
+                ))))
             }
             Rule::MapType => {
                 let mut inner = pair.into_inner();
                 let key_glue_data_type = inner.next().unwrap().as_str();
                 let value_glue_data_type = inner.next().unwrap().as_str();
 
-                let key_arrow_data_type = Self::map_glue_data_type(key_glue_data_type);
-                let value_arrow_data_type = Self::map_glue_data_type(value_glue_data_type);
+                let key_arrow_data_type = Self::map_glue_data_type(key_glue_data_type)?;
+                let value_arrow_data_type = Self::map_glue_data_type(value_glue_data_type)?;
 
-                DataType::Map(
+                Ok(DataType::Map(
                     Box::new(Field::new(
                         "entries",
                         DataType::Struct(vec![
@@ -272,33 +280,25 @@ impl GlueCatalogProvider {
                         true,
                     )),
                     true,
-                )
+                ))
             }
             Rule::StructType => {
                 let inner = pair.into_inner();
-                let fields = inner
-                    .map(|field| {
-                        let mut struct_field_inner = field.into_inner();
-                        let field_name = struct_field_inner.next().unwrap().as_str();
-                        let field_glue_data_type = struct_field_inner.next().unwrap().as_str();
-                        let field_arrow_data_type = Self::map_glue_data_type(field_glue_data_type);
-                        Field::new(field_name, field_arrow_data_type, true)
-                    })
-                    .collect();
-                DataType::Struct(fields)
+                let mut fields = Vec::new();
+                for field in inner {
+                    let mut struct_field_inner = field.into_inner();
+                    let field_name = struct_field_inner.next().unwrap().as_str();
+                    let field_glue_data_type = struct_field_inner.next().unwrap().as_str();
+                    let field_arrow_data_type = Self::map_glue_data_type(field_glue_data_type)?;
+                    fields.push(Field::new(field_name, field_arrow_data_type, true));
+                }
+                Ok(DataType::Struct(fields))
             }
-            _ => {
-                println!("the rule is: {:?}", pair.as_rule());
-                unreachable!()
-            }
+            _ => Err(GlueError::NotImplemented(format!(
+                "No arrow type for glue_data_type: {}",
+                &glue_data_type
+            ))),
         }
-    }
-
-    /*
-    https://docs.aws.amazon.com/glue/latest/dg/aws-glue-api-catalog-tables.html#aws-glue-api-catalog-tables-Column
-     */
-    fn map_glue_type_to_arrow_data_type(_: &str, glue_type: &str) -> Result<DataType> {
-        Ok(Self::map_glue_data_type(glue_type))
     }
 
     fn map_glue_column_to_arrow_field(glue_column: &Column) -> Result<Field> {
@@ -308,7 +308,7 @@ impl GlueCatalogProvider {
     }
 
     fn map_to_arrow_field(glue_name: &str, glue_type: &str) -> Result<Field> {
-        let arrow_data_type = Self::map_glue_type_to_arrow_data_type(glue_name, glue_type)?;
+        let arrow_data_type = Self::map_glue_data_type(glue_type)?;
         Ok(Field::new(glue_name, arrow_data_type, true))
     }
 
@@ -642,35 +642,35 @@ mod tests {
     fn test_map_glue_data_type() -> Result<()> {
         // simple types
         assert_eq!(
-            GlueCatalogProvider::map_glue_data_type("int"),
+            GlueCatalogProvider::map_glue_data_type("int").unwrap(),
             DataType::Int32
         );
         assert_eq!(
-            GlueCatalogProvider::map_glue_data_type("boolean"),
+            GlueCatalogProvider::map_glue_data_type("boolean").unwrap(),
             DataType::Boolean
         );
         assert_eq!(
-            GlueCatalogProvider::map_glue_data_type("bigint"),
+            GlueCatalogProvider::map_glue_data_type("bigint").unwrap(),
             DataType::Int64
         );
         assert_eq!(
-            GlueCatalogProvider::map_glue_data_type("float"),
+            GlueCatalogProvider::map_glue_data_type("float").unwrap(),
             DataType::Float32
         );
         assert_eq!(
-            GlueCatalogProvider::map_glue_data_type("double"),
+            GlueCatalogProvider::map_glue_data_type("double").unwrap(),
             DataType::Float64
         );
         assert_eq!(
-            GlueCatalogProvider::map_glue_data_type("binary"),
+            GlueCatalogProvider::map_glue_data_type("binary").unwrap(),
             DataType::Binary
         );
         assert_eq!(
-            GlueCatalogProvider::map_glue_data_type("timestamp"),
+            GlueCatalogProvider::map_glue_data_type("timestamp").unwrap(),
             DataType::Timestamp(TimeUnit::Nanosecond, None)
         );
         assert_eq!(
-            GlueCatalogProvider::map_glue_data_type("string"),
+            GlueCatalogProvider::map_glue_data_type("string").unwrap(),
             DataType::Utf8
         );
 
@@ -678,11 +678,11 @@ mod tests {
 
         // array type
         assert_eq!(
-            GlueCatalogProvider::map_glue_data_type("array<string>"),
+            GlueCatalogProvider::map_glue_data_type("array<string>").unwrap(),
             list_of_string
         );
         assert_eq!(
-            GlueCatalogProvider::map_glue_data_type("array<array<string>>"),
+            GlueCatalogProvider::map_glue_data_type("array<array<string>>").unwrap(),
             DataType::List(Box::new(Field::new("id", list_of_string.clone(), true)))
         );
 
@@ -700,11 +700,12 @@ mod tests {
 
         // map type
         assert_eq!(
-            GlueCatalogProvider::map_glue_data_type("map<string,boolean>"),
+            GlueCatalogProvider::map_glue_data_type("map<string,boolean>").unwrap(),
             map_of_string_and_boolean
         );
         assert_eq!(
-            GlueCatalogProvider::map_glue_data_type("map<map<string,boolean>,array<string>>"),
+            GlueCatalogProvider::map_glue_data_type("map<map<string,boolean>,array<string>>")
+                .unwrap(),
             DataType::Map(
                 Box::new(Field::new(
                     "entries",
@@ -722,16 +723,16 @@ mod tests {
 
         // struct type
         assert_eq!(
-            GlueCatalogProvider::map_glue_data_type("struct<reply_id:int>"),
+            GlueCatalogProvider::map_glue_data_type("struct<reply_id:int>").unwrap(),
             struct_of_int
         );
         assert_eq!(
-            GlueCatalogProvider::map_glue_data_type("struct<reply:struct<reply_id:int>>"),
+            GlueCatalogProvider::map_glue_data_type("struct<reply:struct<reply_id:int>>").unwrap(),
             DataType::Struct(vec![Field::new("reply", struct_of_int, true)])
         );
 
         assert_eq!(
-            GlueCatalogProvider::map_glue_data_type("decimal(12,9)"),
+            GlueCatalogProvider::map_glue_data_type("decimal(12,9)").unwrap(),
             DataType::Decimal(12, 9)
         );
 
