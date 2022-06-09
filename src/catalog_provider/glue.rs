@@ -32,6 +32,7 @@ use datafusion_objectstore_s3::object_store::s3::S3FileSystem;
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
+use datafusion::datasource::file_format::json::JsonFormat;
 
 /// `CatalogProvider` implementation for the Amazon Glue API
 pub struct GlueCatalogProvider {
@@ -253,6 +254,13 @@ impl GlueCatalogProvider {
                 "org.apache.hadoop.hive.ql.io.avro.AvroContainerOutputFormat",
                 "org.apache.hadoop.hive.serde2.avro.AvroSerDe",
             ) => Ok(Box::new(AvroFormat::default())),
+            (
+                "org.apache.hadoop.mapred.TextInputFormat",
+                "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat",
+                "org.openx.data.jsonserde.JsonSerDe",
+            ) => {
+                Ok(Box::new(JsonFormat::default()))
+            }
             _ => Err(GlueError::NotImplemented(format!(
                 "No support for: {}, {}, {:?} yet.",
                 input_format, output_format, sd
