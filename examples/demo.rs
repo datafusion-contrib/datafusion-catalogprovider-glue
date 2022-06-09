@@ -15,6 +15,9 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use std::any::Any;
+use datafusion::arrow::datatypes::{Schema as ArrowSchema};
+use datafusion::datasource::file_format::FileFormat;
 use datafusion::arrow::array::StringArray;
 use datafusion::error::Result;
 use datafusion::prelude::*;
@@ -22,9 +25,111 @@ use datafusion_catalogprovider_glue::catalog_provider::glue::{
     GlueCatalogProvider, TableRegistrationOptions,
 };
 use std::sync::Arc;
+use datafusion::datasource::file_format::parquet::ParquetFormat;
+use datafusion::datasource::listing::PartitionedFile;
+use datafusion::datasource::TableProvider;
+use datafusion::logical_expr::TableType;
+use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::file_format::FileScanConfig;
+use datafusion_objectstore_s3::object_store::s3::S3FileSystem;
+use deltalake::DeltaTable;
+use async_trait::async_trait;
+
+struct XX {
+    table: DeltaTable,
+}
+
+#[async_trait]
+impl TableProvider for XX {
+    fn schema(&self) -> Arc<ArrowSchema> {
+        Arc::new(
+            <ArrowSchema as TryFrom<&deltalake::schema::Schema>>::try_from(
+                DeltaTable::schema(&self.table).unwrap(),
+            )
+                .unwrap(),
+        )
+    }
+
+    fn table_type(&self) -> TableType {
+        TableType::Base
+    }
+
+    async fn scan(
+        &self,
+        projection: &Option<Vec<usize>>,
+        filters: &[Expr],
+        limit: Option<usize>,
+    ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+        let schema = Arc::new(<ArrowSchema as TryFrom<&deltalake::schema::Schema>>::try_from(
+            DeltaTable::schema(&self.table).unwrap(),
+        )?);
+        let filenames = self.table.get_file_uris();
+
+        println!("table uri: {}", &self.table.table_uri);
+        for file in self.table.get_file_uris() {
+            println!("file: {}", file);
+        }
+
+        let df_object_store = Arc::new(S3FileSystem::default().await);
+
+        let partitions = filenames
+            .into_iter()
+            .zip(self.table.get_active_add_actions())
+            .enumerate()
+            .map(|(_idx, (fname, action))| {
+                let sn = &fname[5..]; // strip s3://
+                let sns = sn.to_string();
+                // TODO: no way to associate stats per file in datafusion at the moment, see:
+                // https://github.com/apache/arrow-datafusion/issues/1301
+                Ok(vec![PartitionedFile::new(sns, action.size as u64)])
+            })
+            .collect::<datafusion::error::Result<_>>()?;
+
+        ParquetFormat::default()
+            .create_physical_plan(
+                FileScanConfig {
+                    object_store: df_object_store,
+                    file_schema: schema,
+                    file_groups: partitions,
+                    statistics: self.table.datafusion_table_statistics(),
+                    projection: projection.clone(),
+                    limit,
+                    table_partition_cols: self.table.get_metadata().unwrap().partition_columns.clone(),
+                },
+                filters,
+            )
+            .await
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let config = SessionConfig::new().with_information_schema(true);
+    let ctx = SessionContext::with_config(config);
+
+    let table_path = "s3://datafusion-delta-testing/COVID-19_NYT";
+    let table = deltalake::open_table(table_path).await.unwrap();
+    let xx = XX{ table };
+
+    //use deltalake::delta_datafusion;
+    ctx.register_table("demo", Arc::new(xx));
+
+    ctx.sql("SELECT * FROM demo")
+        .await.unwrap()
+        .show_limit(10)
+        .await.unwrap();
+
+
+
+    Ok(())
+}
+
+#[tokio::main]
+async fn main2() -> Result<()> {
     let config = SessionConfig::new().with_information_schema(true);
     let ctx = SessionContext::with_config(config);
 
@@ -92,9 +197,13 @@ async fn main() -> Result<()> {
 
 async fn sample(ctx: SessionContext, schema: &str, table: &str, limit: usize) -> Result<()> {
     println!("sampling glue.{}.{}", schema, table);
-    ctx.sql(&format!("select * from glue.{}.{}", schema, table))
-        .await?
-        .show_limit(limit)
-        .await?;
+    if !table.eq("parquet_testing_encrypt_columns_plaintext_footer_parquet_encrypted")
+        && !table.eq("parquet_testing_byte_array_decimal_parquet")
+    && !table.starts_with("parquet_testing"){
+        ctx.sql(&format!("select * from glue.{}.{}", schema, table))
+            .await?
+            .show_limit(limit)
+            .await?;
+    }
     Ok(())
 }

@@ -25,4 +25,6 @@ datafusion-objectstore-s3 = { version = "0.2.1" }
 pest = "2.1"
 pest_derive = "2.1"
 tokio = { version = "1.18", features = ["macros", "rt", "rt-multi-thread", "sync", "fs"] }
+deltalake = { path = "../delta-rs/rust", features = ["datafusion-ext", "s3"]  }
+async-trait = "0.1"
 

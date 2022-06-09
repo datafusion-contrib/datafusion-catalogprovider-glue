@@ -111,8 +111,17 @@ aws s3api create-bucket \
     --bucket datafusion-parquet-testing \
     --region eu-central-1 \
     --create-bucket-configuration LocationConstraint=eu-central-1
-
+    
 find parquet-testing  -type f -exec aws s3 cp ./{} s3://datafusion-{} \;
+
+aws s3api create-bucket \
+    --bucket datafusion-delta-testing \
+    --region eu-central-1 \
+    --create-bucket-configuration LocationConstraint=eu-central-1
+    
+ln -s ../delta-rs/rust/tests/data delta-testing  
+    
+find delta-testing -follow -type f -exec aws s3 cp ./{} s3://datafusion-{} \;
 ```
 
 Create Glue databases:
