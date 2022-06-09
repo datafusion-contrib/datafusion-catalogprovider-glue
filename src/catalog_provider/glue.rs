@@ -273,6 +273,7 @@ impl GlueCatalogProvider {
 
     /*
     https://docs.aws.amazon.com/glue/latest/dg/aws-glue-api-catalog-tables.html#aws-glue-api-catalog-tables-Column
+    https://docs.aws.amazon.com/athena/latest/ug/data-types.html
      */
 
     fn map_glue_data_type(glue_data_type: &str) -> Result<DataType> {
@@ -290,6 +291,8 @@ impl GlueCatalogProvider {
         })?;
 
         match pair.as_rule() {
+            Rule::TinyInt => Ok(DataType::Int8),
+            Rule::SmallInt => Ok(DataType::Int16),
             Rule::Int => Ok(DataType::Int32),
             Rule::Boolean => Ok(DataType::Boolean),
             Rule::BigInt => Ok(DataType::Int64),
@@ -298,6 +301,8 @@ impl GlueCatalogProvider {
             Rule::Binary => Ok(DataType::Binary),
             Rule::Timestamp => Ok(DataType::Timestamp(TimeUnit::Nanosecond, None)),
             Rule::String => Ok(DataType::Utf8),
+            Rule::Char => Ok(DataType::Utf8),
+            Rule::Varchar => Ok(DataType::Utf8),
             Rule::Decimal => {
                 let mut inner = pair.into_inner();
                 let precision = inner
@@ -484,6 +489,30 @@ mod tests {
     use datafusion::arrow::datatypes::TimeUnit;
 
     #[test]
+    fn test_map_tinyint_glue_column_to_arrow_field() -> Result<()> {
+        assert_eq!(
+            GlueCatalogProvider::map_glue_column_to_arrow_field(
+                &Column::builder().name("id").r#type("tinyint").build()
+            )
+            .unwrap(),
+            Field::new("id", DataType::Int8, true)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_map_smallint_glue_column_to_arrow_field() -> Result<()> {
+        assert_eq!(
+            GlueCatalogProvider::map_glue_column_to_arrow_field(
+                &Column::builder().name("id").r#type("smallint").build()
+            )
+            .unwrap(),
+            Field::new("id", DataType::Int16, true)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn test_map_int_glue_column_to_arrow_field() -> Result<()> {
         assert_eq!(
             GlueCatalogProvider::map_glue_column_to_arrow_field(
@@ -572,6 +601,30 @@ mod tests {
         assert_eq!(
             GlueCatalogProvider::map_glue_column_to_arrow_field(
                 &Column::builder().name("id").r#type("string").build()
+            )
+            .unwrap(),
+            Field::new("id", DataType::Utf8, true)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_map_char_glue_column_to_arrow_field() -> Result<()> {
+        assert_eq!(
+            GlueCatalogProvider::map_glue_column_to_arrow_field(
+                &Column::builder().name("id").r#type("char").build()
+            )
+            .unwrap(),
+            Field::new("id", DataType::Utf8, true)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_map_varchar_glue_column_to_arrow_field() -> Result<()> {
+        assert_eq!(
+            GlueCatalogProvider::map_glue_column_to_arrow_field(
+                &Column::builder().name("id").r#type("varchar").build()
             )
             .unwrap(),
             Field::new("id", DataType::Utf8, true)
