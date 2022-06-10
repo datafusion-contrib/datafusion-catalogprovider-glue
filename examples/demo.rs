@@ -18,7 +18,9 @@
 use datafusion::arrow::array::StringArray;
 use datafusion::error::Result;
 use datafusion::prelude::*;
-use datafusion_catalogprovider_glue::catalog_provider::glue::GlueCatalogProvider;
+use datafusion_catalogprovider_glue::catalog_provider::glue::{
+    GlueCatalogProvider, TableRegistrationOptions,
+};
 use std::sync::Arc;
 
 #[tokio::main]
@@ -28,7 +30,9 @@ async fn main() -> Result<()> {
 
     let mut glue_catalog_provider = GlueCatalogProvider::default().await;
 
-    let register_results = glue_catalog_provider.register_all().await?;
+    let register_results = glue_catalog_provider
+        .register_all_with_options(&TableRegistrationOptions::InferSchemaFromData)
+        .await?;
     for result in register_results {
         if result.is_err() {
             // only output tables which were not registered...
@@ -54,6 +58,8 @@ async fn main() -> Result<()> {
     and table_name <> 'parquet_testing_nullable_impala_parquet'
     and table_name <> 'parquet_testing_nonnullable_impala_parquet'
     and table_name <> 'parquet_testing_nested_lists_snappy_parquet'
+    and table_name <> 'parquet_testing_null_list_parquet'
+    order by table_catalog asc, table_schema asc, table_name asc
     "#,
         )
         .await?
