@@ -15,8 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use crate::catalog_provider::glue_data_type_parser::*;
-use crate::error::{GlueError, Result};
+use crate::error::*;
+use crate::glue_data_type_parser::*;
 use aws_sdk_glue::model::{Column, StorageDescriptor, Table};
 use aws_sdk_glue::Client;
 use aws_types::SdkConfig;
@@ -133,7 +133,6 @@ impl GlueCatalogProvider {
     }
 
     async fn register_glue_table(&mut self, glue_table: &Table) -> Result<()> {
-
         let database_name = Self::get_database_name(glue_table)?;
         let table_name = Self::get_table_name(glue_table)?;
 
@@ -145,7 +144,8 @@ impl GlueCatalogProvider {
         let listing_options = Self::get_listing_options(database_name, table_name, &sd)?;
 
         let schema_provider_for_database = self.ensure_schema_provider_for_database(database_name);
-        let (object_store, path) = schema_provider_for_database.object_store(storage_location_uri)?;
+        let (object_store, path) =
+            schema_provider_for_database.object_store(storage_location_uri)?;
 
         let mut ltc = ListingTableConfig::new(object_store, path);
         ltc = ltc.with_schema(SchemaRef::new(schema));
@@ -158,14 +158,20 @@ impl GlueCatalogProvider {
         Ok(())
     }
 
-    fn get_listing_options(database_name: &str, table_name: &str, sd: &StorageDescriptor) -> Result<ListingOptions> {
+    fn get_listing_options(
+        database_name: &str,
+        table_name: &str,
+        sd: &StorageDescriptor,
+    ) -> Result<ListingOptions> {
         Self::calculate_options(sd)
             .map_err(|e| Self::wrap_error_with_table_info(database_name, table_name, e))
     }
 
-    fn ensure_schema_provider_for_database(&mut self, database_name: &str) -> &mut Arc<ObjectStoreSchemaProvider> {
-        self
-            .schema_provider_by_database
+    fn ensure_schema_provider_for_database(
+        &mut self,
+        database_name: &str,
+    ) -> &mut Arc<ObjectStoreSchemaProvider> {
+        self.schema_provider_by_database
             .entry(database_name.to_string())
             .or_insert_with(|| {
                 let instance = ObjectStoreSchemaProvider::default();
@@ -189,15 +195,13 @@ impl GlueCatalogProvider {
     }
 
     fn get_storage_location(sd: &StorageDescriptor) -> Result<&str> {
-        sd.location.as_deref()
-            .ok_or_else(|| {
+        sd.location.as_deref().ok_or_else(|| {
             GlueError::AWS("Failed to find uri in storage descriptor for glue table".to_string())
         })
     }
 
     fn get_storage_descriptor(glue_table: &Table) -> Result<StorageDescriptor> {
-        glue_table.storage_descriptor.clone()
-            .ok_or_else(|| {
+        glue_table.storage_descriptor.clone().ok_or_else(|| {
             GlueError::AWS("Failed to find storage descriptor for glue table".to_string())
         })
     }

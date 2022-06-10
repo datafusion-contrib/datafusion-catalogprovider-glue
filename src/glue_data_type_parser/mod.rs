@@ -18,5 +18,5 @@
 
 /// `GlueDataTypeParser` implementation for parsing glue datatype strings
 #[derive(pest_derive::Parser)]
-#[grammar = "glue_datatype.pest"]
+#[grammar = "glue_data_type_parser/glue_datatype.pest"]
 pub struct GlueDataTypeParser;
