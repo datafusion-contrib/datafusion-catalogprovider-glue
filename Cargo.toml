@@ -2,7 +2,7 @@
 edition = "2021"
 name = "datafusion-catalogprovider-glue"
 description = "Glue as a CatalogProvider for Datafusion"
-version = "0.1.0"
+version = "0.1.6"
 homepage = "https://github.com/datafusion-contrib/datafusion-catalogprovider-glue"
 repository = "https://github.com/datafusion-contrib/datafusion-catalogprovider-glue"
 readme = "README.md"
@@ -25,4 +25,3 @@ datafusion-objectstore-s3 = { version = "0.2.1" }
 pest = "2.1"
 pest_derive = "2.1"
 tokio = { version = "1.18", features = ["macros", "rt", "rt-multi-thread", "sync", "fs"] }
-
