@@ -23,7 +23,11 @@
 //! ## Examples
 //! See [demo.rs](https://github.com/datafusion-contrib/datafusion-catalogprovider-glue/blob/main/examples/demo.rs).
 
+/// Module which contains error definitions
 pub mod error;
 
 /// Module which contains the Glue CatalogProvider
 pub mod catalog_provider;
+
+/// Module which contains parser logic for Glue data types
+mod glue_data_type_parser;
