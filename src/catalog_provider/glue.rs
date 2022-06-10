@@ -133,49 +133,87 @@ impl GlueCatalogProvider {
     }
 
     async fn register_glue_table(&mut self, glue_table: &Table) -> Result<()> {
-        let database_name = glue_table
-            .database_name
-            .as_ref()
-            .ok_or_else(|| GlueError::AWS("Failed to find name for glue database".to_string()))?
-            .clone();
 
-        let schema_provider_for_database = self
+        let database_name = Self::get_database_name(glue_table)?;
+        let table_name = Self::get_table_name(glue_table)?;
+
+        let sd = Self::get_storage_descriptor(glue_table)?;
+        let storage_location_uri = Self::get_storage_location(&sd)?;
+
+        let schema = Self::get_schema(database_name, table_name, &sd)?;
+
+        let listing_options = Self::get_listing_options(database_name, table_name, &sd)?;
+
+        let schema_provider_for_database = self.ensure_schema_provider_for_database(database_name);
+        let (object_store, path) = schema_provider_for_database.object_store(storage_location_uri)?;
+
+        let mut ltc = ListingTableConfig::new(object_store, path);
+        ltc = ltc.with_schema(SchemaRef::new(schema));
+        ltc = ltc.with_listing_options(listing_options);
+
+        schema_provider_for_database
+            .register_listing_table(table_name, storage_location_uri, Some(ltc))
+            .await?;
+
+        Ok(())
+    }
+
+    fn get_listing_options(database_name: &str, table_name: &str, sd: &StorageDescriptor) -> Result<ListingOptions> {
+        Self::calculate_options(sd)
+            .map_err(|e| Self::wrap_error_with_table_info(database_name, table_name, e))
+    }
+
+    fn ensure_schema_provider_for_database(&mut self, database_name: &str) -> &mut Arc<ObjectStoreSchemaProvider> {
+        self
             .schema_provider_by_database
             .entry(database_name.to_string())
             .or_insert_with(|| {
                 let instance = ObjectStoreSchemaProvider::default();
                 instance.register_object_store("s3", self.s3_fs.clone());
                 Arc::new(instance)
-            });
+            })
+    }
 
-        let table_name = glue_table
+    fn get_schema(database_name: &str, table_name: &str, sd: &StorageDescriptor) -> Result<Schema> {
+        let columns = Self::get_columns(sd)?;
+        Self::map_glue_columns_to_arrow_schema(columns)
+            .map_err(|e| Self::wrap_error_with_table_info(database_name, table_name, e))
+    }
+
+    fn get_columns(sd: &StorageDescriptor) -> Result<&Vec<Column>> {
+        sd.columns.as_ref().ok_or_else(|| {
+            GlueError::AWS(
+                "Failed to find columns in storage descriptor for glue table".to_string(),
+            )
+        })
+    }
+
+    fn get_storage_location(sd: &StorageDescriptor) -> Result<&str> {
+        sd.location.as_deref()
+            .ok_or_else(|| {
+            GlueError::AWS("Failed to find uri in storage descriptor for glue table".to_string())
+        })
+    }
+
+    fn get_storage_descriptor(glue_table: &Table) -> Result<StorageDescriptor> {
+        glue_table.storage_descriptor.clone()
+            .ok_or_else(|| {
+            GlueError::AWS("Failed to find storage descriptor for glue table".to_string())
+        })
+    }
+
+    fn get_database_name(glue_table: &Table) -> Result<&str> {
+        glue_table
+            .database_name
+            .as_deref()
+            .ok_or_else(|| GlueError::AWS("Failed to find name for glue database".to_string()))
+    }
+
+    fn get_table_name(glue_table: &Table) -> Result<&str> {
+        glue_table
             .name
             .as_deref()
-            .ok_or_else(|| GlueError::AWS("Failed to find name for glue table".to_string()))?;
-        let sd = glue_table.storage_descriptor.as_ref().ok_or_else(|| {
-            GlueError::AWS("Failed to find storage descriptor for glue table".to_string())
-        })?;
-        let uri = sd.location.as_ref().ok_or_else(|| {
-            GlueError::AWS("Failed to find uri in storage descriptor for glue table".to_string())
-        })?;
-        let (object_store, path) = schema_provider_for_database.object_store(uri)?;
-        let mut ltc = ListingTableConfig::new(object_store, path);
-        let schema =
-            Self::map_glue_columns_to_arrow_schema(sd.columns.as_ref().ok_or_else(|| {
-                GlueError::AWS(
-                    "Failed to find columns in storage descriptor for glue table".to_string(),
-                )
-            })?)
-            .map_err(|e| Self::wrap_error_with_table_info(&database_name, table_name, e))?;
-        let schema_ref = SchemaRef::new(schema);
-        ltc = ltc.with_schema(schema_ref);
-        let listing_options = Self::calculate_options(sd)
-            .map_err(|e| Self::wrap_error_with_table_info(&database_name, table_name, e))?;
-        ltc = ltc.with_listing_options(listing_options);
-        schema_provider_for_database
-            .register_listing_table(table_name, uri, Some(ltc))
-            .await?;
-        Ok(())
+            .ok_or_else(|| GlueError::AWS("Failed to find name for glue table".to_string()))
     }
 
     fn wrap_error_with_table_info(
