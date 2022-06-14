@@ -1,19 +1,4 @@
-// Licensed to the Apache Software Foundation (ASF) under one
-// or more contributor license agreements.  See the NOTICE file
-// distributed with this work for additional information
-// regarding copyright ownership.  The ASF licenses this file
-// to you under the Apache License, Version 2.0 (the
-// "License"); you may not use this file except in compliance
-// with the License.  You may obtain a copy of the License at
-//
-//   http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing,
-// software distributed under the License is distributed on an
-// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-// KIND, either express or implied.  See the License for the
-// specific language governing permissions and limitations
-// under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 use crate::error::*;
 use crate::glue_data_type_parser::*;
@@ -396,117 +381,36 @@ impl GlueCatalogProvider {
         Ok(listing_options)
     }
 
-    /*
-    https://docs.aws.amazon.com/glue/latest/dg/aws-glue-api-catalog-tables.html#aws-glue-api-catalog-tables-Column
-    https://docs.aws.amazon.com/athena/latest/ug/data-types.html
-     */
-
-    fn map_glue_data_type(glue_data_type: &str) -> Result<DataType> {
-        use pest::Parser;
-
-        let mut pairs = GlueDataTypeParser::parse(Rule::DataType, glue_data_type).map_err(|e| {
-            GlueError::GlueDataTypeMapping(format!(
-                "Error while parsing {}: {:?}",
-                glue_data_type, e
-            ))
-        })?;
-
-        let pair = pairs.next().ok_or_else(|| {
-            GlueError::GlueDataTypeMapping("Did not find actual type in DataType".to_string())
-        })?;
-
-        match pair.as_rule() {
-            Rule::TinyInt => Ok(DataType::Int8),
-            Rule::SmallInt => Ok(DataType::Int16),
-            Rule::Int => Ok(DataType::Int32),
-            Rule::Boolean => Ok(DataType::Boolean),
-            Rule::BigInt => Ok(DataType::Int64),
-            Rule::Float => Ok(DataType::Float32),
-            Rule::Double => Ok(DataType::Float64),
-            Rule::Binary => Ok(DataType::Binary),
-            Rule::Timestamp => Ok(DataType::Timestamp(TimeUnit::Nanosecond, None)),
-            Rule::String => Ok(DataType::Utf8),
-            Rule::Char => Ok(DataType::Utf8),
-            Rule::Varchar => Ok(DataType::Utf8),
-            Rule::Date => Ok(DataType::Date32),
-            Rule::Decimal => {
-                let mut inner = pair.into_inner();
-                let precision = inner
-                    .next()
-                    .ok_or_else(|| {
-                        GlueError::GlueDataTypeMapping(format!(
-                            "Did not find precision in {:?}",
-                            glue_data_type
-                        ))
-                    })?
-                    .as_str()
-                    .parse()
-                    .map_err(|_| {
-                        GlueError::GlueDataTypeMapping(format!(
-                            "Failed to parse precision as usize in {:?}",
-                            glue_data_type
-                        ))
-                    })?;
-                let scale = inner
-                    .next()
-                    .ok_or_else(|| {
-                        GlueError::GlueDataTypeMapping(format!(
-                            "Did not find scale in {:?}",
-                            glue_data_type
-                        ))
-                    })?
-                    .as_str()
-                    .parse()
-                    .map_err(|_| {
-                        GlueError::GlueDataTypeMapping(format!(
-                            "Failed to parse scale as usize in {:?}",
-                            glue_data_type
-                        ))
-                    })?;
-                Ok(DataType::Decimal(precision, scale))
-            }
-            Rule::ArrayType => {
-                let array_glue_data_type = pair
-                    .into_inner()
-                    .next()
-                    .ok_or_else(|| {
-                        GlueError::GlueDataTypeMapping(format!(
-                            "Did not find array type in {:?}",
-                            glue_data_type
-                        ))
-                    })?
-                    .as_str();
-                let array_arrow_data_type = Self::map_glue_data_type(array_glue_data_type)?;
+    fn map_glue_data_type_to_arrow_data_type(glue_data_type: &GlueDataType) -> Result<DataType> {
+        match glue_data_type {
+            GlueDataType::TinyInt => Ok(DataType::Int8),
+            GlueDataType::SmallInt => Ok(DataType::Int16),
+            GlueDataType::Int => Ok(DataType::Int32),
+            GlueDataType::Boolean => Ok(DataType::Boolean),
+            GlueDataType::BigInt => Ok(DataType::Int64),
+            GlueDataType::Float => Ok(DataType::Float32),
+            GlueDataType::Double => Ok(DataType::Float64),
+            GlueDataType::Binary => Ok(DataType::Binary),
+            GlueDataType::Timestamp => Ok(DataType::Timestamp(TimeUnit::Nanosecond, None)),
+            GlueDataType::String => Ok(DataType::Utf8),
+            GlueDataType::Char => Ok(DataType::Utf8),
+            GlueDataType::Varchar => Ok(DataType::Utf8),
+            GlueDataType::Date => Ok(DataType::Date32),
+            GlueDataType::Decimal(precision, scale) => Ok(DataType::Decimal(*precision, *scale)),
+            GlueDataType::Array(inner_data_type) => {
+                let array_arrow_data_type =
+                    Self::map_glue_data_type_to_arrow_data_type(inner_data_type)?;
                 Ok(DataType::List(Box::new(Field::new(
                     "item",
                     array_arrow_data_type,
                     true,
                 ))))
             }
-            Rule::MapType => {
-                let mut inner = pair.into_inner();
-                let key_glue_data_type = inner
-                    .next()
-                    .ok_or_else(|| {
-                        GlueError::GlueDataTypeMapping(format!(
-                            "Did not key data type in {:?}",
-                            glue_data_type
-                        ))
-                    })?
-                    .as_str();
-                let value_glue_data_type = inner
-                    .next()
-                    .ok_or_else(|| {
-                        GlueError::GlueDataTypeMapping(format!(
-                            "Did not find value data type in {:?}",
-                            glue_data_type
-                        ))
-                    })?
-                    .as_str();
-
-                let key_arrow_data_type = Self::map_glue_data_type(key_glue_data_type)?;
-                let value_arrow_data_type = Self::map_glue_data_type(value_glue_data_type)?;
-
+            GlueDataType::Map(key_glue_data_type, value_glue_data_type) => {
+                let key_arrow_data_type =
+                    Self::map_glue_data_type_to_arrow_data_type(key_glue_data_type)?;
+                let value_arrow_data_type =
+                    Self::map_glue_data_type_to_arrow_data_type(value_glue_data_type)?;
                 Ok(DataType::Map(
                     Box::new(Field::new(
                         "key_value",
@@ -519,39 +423,27 @@ impl GlueCatalogProvider {
                     true,
                 ))
             }
-            Rule::StructType => {
-                let inner = pair.into_inner();
+            GlueDataType::Struct(glue_fields) => {
                 let mut fields = Vec::new();
-                for field in inner {
-                    let mut struct_field_inner = field.into_inner();
-                    let field_name = struct_field_inner
-                        .next()
-                        .ok_or_else(|| {
-                            GlueError::GlueDataTypeMapping(format!(
-                                "Did not find field name in {:?}",
-                                glue_data_type
-                            ))
-                        })?
-                        .as_str();
-                    let field_glue_data_type = struct_field_inner
-                        .next()
-                        .ok_or_else(|| {
-                            GlueError::GlueDataTypeMapping(format!(
-                                "Did not find field data type in {:?}",
-                                glue_data_type
-                            ))
-                        })?
-                        .as_str();
-                    let field_arrow_data_type = Self::map_glue_data_type(field_glue_data_type)?;
-                    fields.push(Field::new(field_name, field_arrow_data_type, true));
+                for glue_field in glue_fields {
+                    let field_arrow_data_type =
+                        Self::map_glue_data_type_to_arrow_data_type(&glue_field.data_type)?;
+                    fields.push(Field::new(&glue_field.name, field_arrow_data_type, true));
                 }
                 Ok(DataType::Struct(fields))
             }
-            _ => Err(GlueError::NotImplemented(format!(
-                "No arrow type for glue_data_type: {}",
-                &glue_data_type
-            ))),
         }
+    }
+
+    fn map_glue_data_type(glue_data_type: &str) -> Result<DataType> {
+        let parsed_glue_data_type = parse_glue_data_type(glue_data_type).map_err(|e| {
+            GlueError::GlueDataTypeMapping(format!(
+                "Error while parsing {}: {:?}",
+                glue_data_type, e
+            ))
+        })?;
+
+        Self::map_glue_data_type_to_arrow_data_type(&parsed_glue_data_type)
     }
 
     fn map_glue_column_to_arrow_field(glue_column: &Column) -> Result<Field> {
