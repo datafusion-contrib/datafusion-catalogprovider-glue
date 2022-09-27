@@ -16,22 +16,41 @@
 // under the License.
 
 use datafusion::arrow::array::StringArray;
+use datafusion::common::DataFusionError;
+use datafusion::datasource::object_store::ObjectStoreRegistry;
 use datafusion::error::Result;
+use datafusion::execution::runtime_env::{RuntimeConfig, RuntimeEnv};
 use datafusion::prelude::*;
 use datafusion_catalogprovider_glue::catalog_provider::glue::{
     GlueCatalogProvider, TableRegistrationOptions,
 };
 use std::sync::Arc;
+use url::Url;
+use s3_object_store_provider::DemoS3ObjectStoreProvider;
+
+mod s3_object_store_provider;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let config = SessionConfig::new().with_information_schema(true);
-    let ctx = SessionContext::with_config(config);
 
-    let mut glue_catalog_provider = GlueCatalogProvider::default().await;
+    // Load an aws sdk config from the environment
+    let sdk_config = aws_config::load_from_env().await;
+
+    // Register an object store provider which creates instances for each requested s3://bucket using the sdk_config credentials
+    // As an alternative you can also manually register the required object_store(s)
+    let object_store_provider = Arc::new(DemoS3ObjectStoreProvider::new(&sdk_config).await?);
+    let object_store_registry = Arc::new(ObjectStoreRegistry::new_with_provider(Some(
+        object_store_provider,
+    )));
+    let runtime_config = RuntimeConfig::default().with_object_store_registry(object_store_registry);
+    let config = SessionConfig::new().with_information_schema(true);
+    let runtime = Arc::new(RuntimeEnv::new(runtime_config)?);
+    let ctx = SessionContext::with_config_rt(config, runtime);
+
+    let mut glue_catalog_provider = GlueCatalogProvider::new(&sdk_config);
 
     let register_results = glue_catalog_provider
-        .register_all_with_options(&TableRegistrationOptions::InferSchemaFromData)
+        .register_all_with_options(&TableRegistrationOptions::InferSchemaFromData, &ctx.state())
         .await?;
     for result in register_results {
         if result.is_err() {
@@ -97,4 +116,13 @@ async fn sample(ctx: SessionContext, schema: &str, table: &str, limit: usize) ->
         .show_limit(limit)
         .await?;
     Ok(())
+}
+
+fn get_host_name(url: &Url) -> Result<&str> {
+    url.host_str().ok_or_else(|| {
+        DataFusionError::Execution(format!(
+            "Not able to parse hostname from url, {}",
+            url.as_str()
+        ))
+    })
 }

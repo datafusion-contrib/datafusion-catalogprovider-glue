@@ -7,14 +7,16 @@ use aws_sdk_glue::Client;
 use aws_types::SdkConfig;
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use datafusion::catalog::catalog::CatalogProvider;
-use datafusion::catalog::schema::{ObjectStoreSchemaProvider, SchemaProvider};
+use datafusion::catalog::schema::{MemorySchemaProvider, SchemaProvider};
 use datafusion::datasource::file_format::avro::AvroFormat;
 use datafusion::datasource::file_format::csv::CsvFormat;
 use datafusion::datasource::file_format::json::JsonFormat;
 use datafusion::datasource::file_format::parquet::ParquetFormat;
 use datafusion::datasource::file_format::FileFormat;
-use datafusion::datasource::listing::{ListingOptions, ListingTableConfig};
-use datafusion_objectstore_s3::object_store::s3::S3FileSystem;
+use datafusion::datasource::listing::{
+    ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
+};
+use datafusion::execution::context::SessionState;
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -30,35 +32,38 @@ pub enum TableRegistrationOptions {
 /// `CatalogProvider` implementation for the Amazon Glue API
 pub struct GlueCatalogProvider {
     client: Client,
-    s3_fs: Arc<S3FileSystem>,
-    schema_provider_by_database: HashMap<String, Arc<ObjectStoreSchemaProvider>>,
+    schema_provider_by_database: HashMap<String, Arc<MemorySchemaProvider>>,
 }
 
 impl GlueCatalogProvider {
     /// Convenience wrapper for creating a new `GlueCatalogProvider` using default configuration options.  Only works with AWS.
     pub async fn default() -> Self {
         let shared_config = aws_config::load_from_env().await;
-        let s3_fs = Arc::new(S3FileSystem::default().await);
-        GlueCatalogProvider::new(&shared_config, &s3_fs)
+        GlueCatalogProvider::new(&shared_config)
     }
 
     /// Create a new Glue CatalogProvider
-    pub fn new(sdk_config: &SdkConfig, s3_fs: &Arc<S3FileSystem>) -> Self {
+    pub fn new(sdk_config: &SdkConfig) -> Self {
         let client = Client::new(sdk_config);
         let schema_provider_by_database = HashMap::new();
         GlueCatalogProvider {
             client,
-            s3_fs: s3_fs.clone(),
             schema_provider_by_database,
         }
     }
 
     /// Register the table with the given database and table name
-    pub async fn register_table(&mut self, database: &str, table: &str) -> Result<()> {
+    pub async fn register_table(
+        &mut self,
+        database: &str,
+        table: &str,
+        ctx: &SessionState,
+    ) -> Result<()> {
         self.register_table_with_options(
             database,
             table,
             &TableRegistrationOptions::DeriveSchemaFromGlueTable,
+            ctx,
         )
         .await
     }
@@ -69,6 +74,7 @@ impl GlueCatalogProvider {
         database: &str,
         table: &str,
         table_registration_options: &TableRegistrationOptions,
+        ctx: &SessionState,
     ) -> Result<()> {
         let glue_table = self
             .client
@@ -80,15 +86,20 @@ impl GlueCatalogProvider {
             .table
             .ok_or_else(|| GlueError::AWS(format!("Did not find table {}.{}", database, table)))?;
 
-        self.register_glue_table(&glue_table, table_registration_options)
+        self.register_glue_table(&glue_table, table_registration_options, ctx)
             .await
     }
 
     /// Register all tables in the given glue database
-    pub async fn register_tables(&mut self, database: &str) -> Result<Vec<Result<()>>> {
+    pub async fn register_tables(
+        &mut self,
+        database: &str,
+        ctx: &SessionState,
+    ) -> Result<Vec<Result<()>>> {
         self.register_tables_with_options(
             database,
             &TableRegistrationOptions::DeriveSchemaFromGlueTable,
+            ctx,
         )
         .await
     }
@@ -98,6 +109,7 @@ impl GlueCatalogProvider {
         &mut self,
         database: &str,
         table_registration_options: &TableRegistrationOptions,
+        ctx: &SessionState,
     ) -> Result<Vec<Result<()>>> {
         let glue_tables = self
             .client
@@ -113,7 +125,7 @@ impl GlueCatalogProvider {
         let mut results = Vec::new();
         for glue_table in glue_tables {
             let result = self
-                .register_glue_table(&glue_table, table_registration_options)
+                .register_glue_table(&glue_table, table_registration_options, ctx)
                 .await;
             results.push(result);
         }
@@ -122,8 +134,8 @@ impl GlueCatalogProvider {
     }
 
     /// Register all tables in all glue databases
-    pub async fn register_all(&mut self) -> Result<Vec<Result<()>>> {
-        self.register_all_with_options(&TableRegistrationOptions::DeriveSchemaFromGlueTable)
+    pub async fn register_all(&mut self, ctx: &SessionState) -> Result<Vec<Result<()>>> {
+        self.register_all_with_options(&TableRegistrationOptions::DeriveSchemaFromGlueTable, ctx)
             .await
     }
 
@@ -131,6 +143,7 @@ impl GlueCatalogProvider {
     pub async fn register_all_with_options(
         &mut self,
         table_registration_options: &TableRegistrationOptions,
+        ctx: &SessionState,
     ) -> Result<Vec<Result<()>>> {
         let glue_databases = self
             .client
@@ -158,7 +171,7 @@ impl GlueCatalogProvider {
 
             for glue_table in glue_tables {
                 let result = self
-                    .register_glue_table(&glue_table, table_registration_options)
+                    .register_glue_table(&glue_table, table_registration_options, ctx)
                     .await;
                 results.push(result);
             }
@@ -171,6 +184,7 @@ impl GlueCatalogProvider {
         &mut self,
         glue_table: &Table,
         table_registration_options: &TableRegistrationOptions,
+        ctx: &SessionState,
     ) -> Result<()> {
         let database_name = Self::get_database_name(glue_table)?;
         let table_name = Self::get_table_name(glue_table)?;
@@ -181,10 +195,9 @@ impl GlueCatalogProvider {
         let listing_options = Self::get_listing_options(database_name, table_name, &sd)?;
 
         let schema_provider_for_database = self.ensure_schema_provider_for_database(database_name);
-        let (object_store, path) =
-            schema_provider_for_database.object_store(storage_location_uri)?;
 
-        let ltc = ListingTableConfig::new(object_store, path);
+        let ltu = ListingTableUrl::parse(storage_location_uri)?;
+        let ltc = ListingTableConfig::new(ltu);
         let ltc_with_lo = ltc.with_listing_options(listing_options);
 
         let ltc_with_lo_and_schema = match table_registration_options {
@@ -192,16 +205,13 @@ impl GlueCatalogProvider {
                 let schema = Self::derive_schema(database_name, table_name, &sd)?;
                 ltc_with_lo.with_schema(SchemaRef::new(schema))
             }
-            TableRegistrationOptions::InferSchemaFromData => ltc_with_lo.infer_schema().await?,
+            TableRegistrationOptions::InferSchemaFromData => ltc_with_lo.infer_schema(ctx).await?,
         };
 
+        let listing_table = ListingTable::try_new(ltc_with_lo_and_schema)?;
+
         schema_provider_for_database
-            .register_listing_table(
-                table_name,
-                storage_location_uri,
-                Some(ltc_with_lo_and_schema),
-            )
-            .await?;
+            .register_table(table_name.to_string(), Arc::new(listing_table))?;
 
         Ok(())
     }
@@ -218,12 +228,11 @@ impl GlueCatalogProvider {
     fn ensure_schema_provider_for_database(
         &mut self,
         database_name: &str,
-    ) -> &mut Arc<ObjectStoreSchemaProvider> {
+    ) -> &mut Arc<MemorySchemaProvider> {
         self.schema_provider_by_database
             .entry(database_name.to_string())
             .or_insert_with(|| {
-                let instance = ObjectStoreSchemaProvider::default();
-                instance.register_object_store("s3", self.s3_fs.clone());
+                let instance = MemorySchemaProvider::new();
                 Arc::new(instance)
             })
     }
@@ -396,7 +405,9 @@ impl GlueCatalogProvider {
             GlueDataType::Char => Ok(DataType::Utf8),
             GlueDataType::Varchar => Ok(DataType::Utf8),
             GlueDataType::Date => Ok(DataType::Date32),
-            GlueDataType::Decimal(precision, scale) => Ok(DataType::Decimal(*precision, *scale)),
+            GlueDataType::Decimal(precision, scale) => {
+                Ok(DataType::Decimal256(*precision as u8, *scale as u8))
+            }
             GlueDataType::Array(inner_data_type) => {
                 let array_arrow_data_type =
                     Self::map_glue_data_type_to_arrow_data_type(inner_data_type)?;
@@ -681,7 +692,7 @@ mod tests {
                 &Column::builder().name("id").r#type("decimal(12,9)").build()
             )
             .unwrap(),
-            Field::new("id", DataType::Decimal(12, 9), true)
+            Field::new("id", DataType::Decimal256(12, 9), true)
         );
         Ok(())
     }
@@ -958,7 +969,7 @@ mod tests {
 
         assert_eq!(
             GlueCatalogProvider::map_glue_data_type("decimal(12,9)").unwrap(),
-            DataType::Decimal(12, 9)
+            DataType::Decimal256(12, 9)
         );
 
         Ok(())
