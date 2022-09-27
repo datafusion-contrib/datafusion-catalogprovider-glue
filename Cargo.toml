@@ -26,4 +26,3 @@ pest = "2.3"
 pest_derive = "2.3"
 tokio = { version = "1.21", features = ["macros", "rt", "rt-multi-thread", "sync", "fs"] }
 url = "2.2"
-
