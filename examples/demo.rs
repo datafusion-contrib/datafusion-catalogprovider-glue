@@ -15,24 +15,23 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use aws_types::credentials::ProvideCredentials;
+use aws_types::{Credentials, SdkConfig};
 use datafusion::arrow::array::StringArray;
-use datafusion::common::DataFusionError;
-use datafusion::datasource::object_store::ObjectStoreRegistry;
-use datafusion::error::Result;
+use datafusion::common::{DataFusionError, Result};
+use datafusion::datasource::object_store::{ObjectStoreProvider, ObjectStoreRegistry};
 use datafusion::execution::runtime_env::{RuntimeConfig, RuntimeEnv};
 use datafusion::prelude::*;
 use datafusion_catalogprovider_glue::catalog_provider::glue::{
     GlueCatalogProvider, TableRegistrationOptions,
 };
+use object_store::aws::AmazonS3Builder;
+use object_store::ObjectStore;
 use std::sync::Arc;
 use url::Url;
-use s3_object_store_provider::DemoS3ObjectStoreProvider;
-
-mod s3_object_store_provider;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-
     // Load an aws sdk config from the environment
     let sdk_config = aws_config::load_from_env().await;
 
@@ -118,6 +117,50 @@ async fn sample(ctx: SessionContext, schema: &str, table: &str, limit: usize) ->
     Ok(())
 }
 
+pub struct DemoS3ObjectStoreProvider {
+    credentials: Credentials,
+    region: String,
+}
+
+impl DemoS3ObjectStoreProvider {
+    pub async fn new(sdk_config: &SdkConfig) -> crate::Result<DemoS3ObjectStoreProvider> {
+        let credentials_provider = sdk_config
+            .credentials_provider()
+            .expect("could not find credentials provider");
+        let credentials = credentials_provider
+            .provide_credentials()
+            .await
+            .expect("could not load credentials");
+        let region = sdk_config
+            .region()
+            .map(|r| r.to_string())
+            .unwrap_or_else(|| "eu-central-1".to_string());
+
+        Ok(DemoS3ObjectStoreProvider {
+            credentials,
+            region,
+        })
+    }
+
+    fn build_s3_object_store(&self, url: &Url) -> crate::Result<Arc<dyn ObjectStore>> {
+        let bucket_name = get_host_name(url)?;
+
+        let s3_builder = AmazonS3Builder::new()
+            .with_bucket_name(bucket_name)
+            .with_region(&self.region)
+            .with_access_key_id(self.credentials.access_key_id())
+            .with_secret_access_key(self.credentials.secret_access_key());
+
+        let s3 = match self.credentials.session_token() {
+            Some(session_token) => s3_builder.with_token(session_token),
+            None => s3_builder,
+        }
+        .build()?;
+
+        Ok(Arc::new(s3))
+    }
+}
+
 fn get_host_name(url: &Url) -> Result<&str> {
     url.host_str().ok_or_else(|| {
         DataFusionError::Execution(format!(
@@ -125,4 +168,11 @@ fn get_host_name(url: &Url) -> Result<&str> {
             url.as_str()
         ))
     })
+}
+
+/// ObjectStoreProvider for S3
+impl ObjectStoreProvider for DemoS3ObjectStoreProvider {
+    fn get_by_url(&self, url: &Url) -> Option<Arc<dyn ObjectStore>> {
+        self.build_s3_object_store(url).ok()
+    }
 }
