@@ -15,23 +15,41 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use aws_types::credentials::ProvideCredentials;
+use aws_types::{Credentials, SdkConfig};
 use datafusion::arrow::array::StringArray;
-use datafusion::error::Result;
+use datafusion::common::{DataFusionError, Result};
+use datafusion::datasource::object_store::{ObjectStoreProvider, ObjectStoreRegistry};
+use datafusion::execution::runtime_env::{RuntimeConfig, RuntimeEnv};
 use datafusion::prelude::*;
 use datafusion_catalogprovider_glue::catalog_provider::glue::{
     GlueCatalogProvider, TableRegistrationOptions,
 };
+use object_store::aws::AmazonS3Builder;
+use object_store::ObjectStore;
 use std::sync::Arc;
+use url::Url;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let config = SessionConfig::new().with_information_schema(true);
-    let ctx = SessionContext::with_config(config);
+    // Load an aws sdk config from the environment
+    let sdk_config = aws_config::load_from_env().await;
 
-    let mut glue_catalog_provider = GlueCatalogProvider::default().await;
+    // Register an object store provider which creates instances for each requested s3://bucket using the sdk_config credentials
+    // As an alternative you can also manually register the required object_store(s)
+    let object_store_provider = Arc::new(DemoS3ObjectStoreProvider::new(&sdk_config).await?);
+    let object_store_registry = Arc::new(ObjectStoreRegistry::new_with_provider(Some(
+        object_store_provider,
+    )));
+    let runtime_config = RuntimeConfig::default().with_object_store_registry(object_store_registry);
+    let config = SessionConfig::new().with_information_schema(true);
+    let runtime = Arc::new(RuntimeEnv::new(runtime_config)?);
+    let ctx = SessionContext::with_config_rt(config, runtime);
+
+    let mut glue_catalog_provider = GlueCatalogProvider::new(&sdk_config);
 
     let register_results = glue_catalog_provider
-        .register_all_with_options(&TableRegistrationOptions::InferSchemaFromData)
+        .register_all_with_options(&TableRegistrationOptions::InferSchemaFromData, &ctx.state())
         .await?;
     for result in register_results {
         if result.is_err() {
@@ -97,4 +115,64 @@ async fn sample(ctx: SessionContext, schema: &str, table: &str, limit: usize) ->
         .show_limit(limit)
         .await?;
     Ok(())
+}
+
+pub struct DemoS3ObjectStoreProvider {
+    credentials: Credentials,
+    region: String,
+}
+
+impl DemoS3ObjectStoreProvider {
+    pub async fn new(sdk_config: &SdkConfig) -> crate::Result<DemoS3ObjectStoreProvider> {
+        let credentials_provider = sdk_config
+            .credentials_provider()
+            .expect("could not find credentials provider");
+        let credentials = credentials_provider
+            .provide_credentials()
+            .await
+            .expect("could not load credentials");
+        let region = sdk_config
+            .region()
+            .map(|r| r.to_string())
+            .unwrap_or_else(|| "eu-central-1".to_string());
+
+        Ok(DemoS3ObjectStoreProvider {
+            credentials,
+            region,
+        })
+    }
+
+    fn build_s3_object_store(&self, url: &Url) -> crate::Result<Arc<dyn ObjectStore>> {
+        let bucket_name = get_host_name(url)?;
+
+        let s3_builder = AmazonS3Builder::new()
+            .with_bucket_name(bucket_name)
+            .with_region(&self.region)
+            .with_access_key_id(self.credentials.access_key_id())
+            .with_secret_access_key(self.credentials.secret_access_key());
+
+        let s3 = match self.credentials.session_token() {
+            Some(session_token) => s3_builder.with_token(session_token),
+            None => s3_builder,
+        }
+        .build()?;
+
+        Ok(Arc::new(s3))
+    }
+}
+
+fn get_host_name(url: &Url) -> Result<&str> {
+    url.host_str().ok_or_else(|| {
+        DataFusionError::Execution(format!(
+            "Not able to parse hostname from url, {}",
+            url.as_str()
+        ))
+    })
+}
+
+/// ObjectStoreProvider for S3
+impl ObjectStoreProvider for DemoS3ObjectStoreProvider {
+    fn get_by_url(&self, url: &Url) -> Option<Arc<dyn ObjectStore>> {
+        self.build_s3_object_store(url).ok()
+    }
 }
