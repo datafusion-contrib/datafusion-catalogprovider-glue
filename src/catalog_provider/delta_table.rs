@@ -24,7 +24,7 @@ fn table_location(table: &Table) -> Result<String> {
     Ok(location)
 }
 
-pub async fn create_delta_table(
+pub(crate) async fn create_delta_table(
     table: &Table,
     object_store_registry: &Option<Arc<dyn ObjectStoreRegistry>>,
 ) -> Result<Arc<dyn TableProvider>> {

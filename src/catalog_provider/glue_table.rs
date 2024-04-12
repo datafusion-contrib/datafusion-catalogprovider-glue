@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::fmt::Debug;
 use std::{any::Any, sync::Arc};
 use crate::error;
 use crate::glue_data_type_parser::*;
@@ -17,10 +16,7 @@ use aws_sdk_glue::{types::Table, Client};
 use aws_sdk_glue::types::{Column, StorageDescriptor};
 
 use datafusion::{
-    arrow::{
-        datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit},
-        record_batch::RecordBatch,
-    },
+    arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit},
     common::{DataFusionError, ToDFSchema},
     datasource::{
         listing::{ListingOptions, ListingTableUrl, PartitionedFile},
@@ -31,21 +27,23 @@ use datafusion::{
         },
     },
     error::Result,
-    execution::{context::SessionState, TaskContext},
+    execution::context::SessionState,
     logical_expr::{utils::conjunction, Expr, TableProviderFilterPushDown, TableType},
     optimizer::OptimizerConfig,
-    physical_expr::{planner::create_physical_expr, PhysicalSortExpr},
-    physical_plan::{
-        common::compute_record_batch_statistics, internal_err, memory::MemoryStream, DisplayAs,
-        DisplayFormatType, ExecutionPlan, Partitioning, SendableRecordBatchStream, Statistics,
-    },
+    physical_expr::planner::create_physical_expr,
+    physical_plan::{ExecutionPlan, Statistics},
     scalar::ScalarValue,
 };
 
+/// GlueTable
 pub struct GlueTable {
+    /// glue table
     pub table: Table,
+    /// aws client
     pub client: Client,
+    /// table schema (including partitioning columns)
     pub schema: SchemaRef,
+    /// listing options
     pub listing_options: ListingOptions,
 }
 
@@ -57,9 +55,10 @@ fn scalar_to_string(scalar: &ScalarValue) -> String {
 }
 
 impl GlueTable {
+    /// constructor
     pub fn new(table: Table, client: Client) -> error::Result<Self> {
         let sd = Self::get_storage_descriptor(&table)?;
-        let database_name = table.database_name().unwrap();
+        let database_name = Self::get_database_name(&table)?;
         let table_name = table.name();
         let mut listing_options = Self::get_listing_options(database_name, table_name, &sd)?;
         let partitions = table.partition_keys();
@@ -165,8 +164,8 @@ impl GlueTable {
         })
     }
 
-    fn get_storage_descriptor(glue_table: &Table) -> error::Result<StorageDescriptor> {
-        glue_table.storage_descriptor.clone().ok_or_else(|| {
+    fn get_storage_descriptor(glue_table: &Table) -> error::Result<&StorageDescriptor> {
+        glue_table.storage_descriptor().ok_or_else(|| {
             error::GlueError::AWS("Failed to find storage descriptor for glue table".to_string())
         })
     }
@@ -415,7 +414,7 @@ async fn list_all_files<'a>(
         .boxed())
 }
 
-pub async fn partition_file_list<'a>(
+async fn partition_file_list<'a>(
     ctx: &'a SessionState,
     part: &'a Option<&'a aws_sdk_glue::types::Partition>,
     store: &'a dyn ObjectStore,
@@ -464,11 +463,8 @@ impl TableProvider for GlueTable {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        let table_url = self
-            .table
-            .storage_descriptor()
-            .and_then(|sd| sd.location())
-            .unwrap();
+        let sd = Self::get_storage_descriptor(&self.table)?;
+        let table_url = Self::get_storage_location(sd)?;
         let listing_table_url = ListingTableUrl::parse(table_url)?;
         let object_store_url = listing_table_url.object_store();
         let store = state.runtime_env().object_store(listing_table_url.clone())?;
@@ -591,110 +587,552 @@ impl TableProvider for GlueTable {
     }
 }
 
-/// Execution plan for empty relation with produce_one_row=false
-#[derive(Debug)]
-pub struct EmptyExec {
-    /// The schema for the produced row
-    schema: SchemaRef,
-    /// Number of partitions
-    partitions: usize,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aws_sdk_glue::types::Column;
+    use datafusion::arrow::datatypes::TimeUnit;
 
-impl EmptyExec {
-    /// Create a new EmptyExec
-    pub fn new(schema: SchemaRef) -> Self {
-        EmptyExec {
-            schema,
-            partitions: 1,
-        }
+    #[test]
+    fn test_map_tinyint_glue_column_to_arrow_field() -> Result<()> {
+        assert_eq!(
+            GlueTable::map_glue_column_to_arrow_field(
+                &Column::builder()
+                    .name("id")
+                    .r#type("tinyint")
+                    .build()
+                    .unwrap()
+            )
+            .unwrap(),
+            Field::new("id", DataType::Int8, true)
+        );
+        Ok(())
     }
 
-    /// Create a new EmptyExec with specified partition number
-    pub fn with_partitions(mut self, partitions: usize) -> Self {
-        self.partitions = partitions;
-        self
+    #[test]
+    fn test_map_smallint_glue_column_to_arrow_field() -> Result<()> {
+        assert_eq!(
+            GlueTable::map_glue_column_to_arrow_field(
+                &Column::builder()
+                    .name("id")
+                    .r#type("smallint")
+                    .build()
+                    .unwrap()
+            )
+            .unwrap(),
+            Field::new("id", DataType::Int16, true)
+        );
+        Ok(())
     }
 
-    fn data(&self) -> datafusion::error::Result<Vec<RecordBatch>> {
-        Ok(vec![])
-    }
-}
-
-impl DisplayAs for EmptyExec {
-    fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match t {
-            DisplayFormatType::Default | DisplayFormatType::Verbose => {
-                write!(f, "EmptyExec")
-            }
-        }
-    }
-}
-
-impl ExecutionPlan for EmptyExec {
-    /// Return a reference to Any that can be used for downcasting
-    fn as_any(&self) -> &dyn Any {
-        self
+    #[test]
+    fn test_map_int_glue_column_to_arrow_field() -> Result<()> {
+        assert_eq!(
+            GlueTable::map_glue_column_to_arrow_field(
+                &Column::builder().name("id").r#type("int").build().unwrap()
+            )
+            .unwrap(),
+            Field::new("id", DataType::Int32, true)
+        );
+        Ok(())
     }
 
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
+    #[test]
+    fn test_map_integer_glue_column_to_arrow_field() -> Result<()> {
+        assert_eq!(
+            GlueTable::map_glue_column_to_arrow_field(
+                &Column::builder()
+                    .name("id")
+                    .r#type("integer")
+                    .build()
+                    .unwrap()
+            )
+            .unwrap(),
+            Field::new("id", DataType::Int32, true)
+        );
+        Ok(())
     }
 
-    fn children(&self) -> Vec<Arc<dyn ExecutionPlan>> {
-        vec![]
+    #[test]
+    fn test_map_bigint_glue_column_to_arrow_field() -> Result<()> {
+        assert_eq!(
+            GlueTable::map_glue_column_to_arrow_field(
+                &Column::builder()
+                    .name("id")
+                    .r#type("bigint")
+                    .build()
+                    .unwrap()
+            )
+            .unwrap(),
+            Field::new("id", DataType::Int64, true)
+        );
+        Ok(())
     }
 
-    /// Get the output partitioning of this plan
-    fn output_partitioning(&self) -> Partitioning {
-        Partitioning::UnknownPartitioning(self.partitions)
+    #[test]
+    fn test_map_float_glue_column_to_arrow_field() -> Result<()> {
+        assert_eq!(
+            GlueTable::map_glue_column_to_arrow_field(
+                &Column::builder()
+                    .name("id")
+                    .r#type("float")
+                    .build()
+                    .unwrap()
+            )
+            .unwrap(),
+            Field::new("id", DataType::Float32, true)
+        );
+        Ok(())
     }
 
-    fn output_ordering(&self) -> Option<&[PhysicalSortExpr]> {
-        None
+    #[test]
+    fn test_map_double_glue_column_to_arrow_field() -> Result<()> {
+        assert_eq!(
+            GlueTable::map_glue_column_to_arrow_field(
+                &Column::builder()
+                    .name("id")
+                    .r#type("double")
+                    .build()
+                    .unwrap()
+            )
+            .unwrap(),
+            Field::new("id", DataType::Float64, true)
+        );
+        Ok(())
     }
 
-    fn with_new_children(
-        self: Arc<Self>,
-        _: Vec<Arc<dyn ExecutionPlan>>,
-    ) -> Result<Arc<dyn ExecutionPlan>> {
-        Ok(Arc::new(EmptyExec::new(self.schema.clone())))
+    #[test]
+    fn test_map_boolean_glue_column_to_arrow_field() -> Result<()> {
+        assert_eq!(
+            GlueTable::map_glue_column_to_arrow_field(
+                &Column::builder()
+                    .name("id")
+                    .r#type("boolean")
+                    .build()
+                    .unwrap()
+            )
+            .unwrap(),
+            Field::new("id", DataType::Boolean, true)
+        );
+        Ok(())
     }
 
-    fn execute(
-        &self,
-        partition: usize,
-        context: Arc<TaskContext>,
-    ) -> Result<SendableRecordBatchStream> {
-        log::trace!(
-            "Start EmptyExec::execute for partition {} of context session_id {} and task_id {:?}",
-            partition,
-            context.session_id(),
-            context.task_id()
+    #[test]
+    fn test_map_binary_glue_column_to_arrow_field() -> Result<()> {
+        assert_eq!(
+            GlueTable::map_glue_column_to_arrow_field(
+                &Column::builder()
+                    .name("id")
+                    .r#type("binary")
+                    .build()
+                    .unwrap()
+            )
+            .unwrap(),
+            Field::new("id", DataType::Binary, true)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_map_date_glue_column_to_arrow_field() -> Result<()> {
+        assert_eq!(
+            GlueTable::map_glue_column_to_arrow_field(
+                &Column::builder().name("id").r#type("date").build().unwrap()
+            )
+            .unwrap(),
+            Field::new("id", DataType::Date32, true)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_map_timestamp_glue_column_to_arrow_field() -> Result<()> {
+        assert_eq!(
+            GlueTable::map_glue_column_to_arrow_field(
+                &Column::builder()
+                    .name("id")
+                    .r#type("timestamp")
+                    .build()
+                    .unwrap()
+            )
+            .unwrap(),
+            Field::new("id", DataType::Timestamp(TimeUnit::Nanosecond, None), true)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_map_string_glue_column_to_arrow_field() -> Result<()> {
+        assert_eq!(
+            GlueTable::map_glue_column_to_arrow_field(
+                &Column::builder()
+                    .name("id")
+                    .r#type("string")
+                    .build()
+                    .unwrap()
+            )
+            .unwrap(),
+            Field::new("id", DataType::Utf8, true)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_map_char_glue_column_to_arrow_field() -> Result<()> {
+        assert_eq!(
+            GlueTable::map_glue_column_to_arrow_field(
+                &Column::builder().name("id").r#type("char").build().unwrap()
+            )
+            .unwrap(),
+            Field::new("id", DataType::Utf8, true)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_map_varchar_glue_column_to_arrow_field() -> Result<()> {
+        assert_eq!(
+            GlueTable::map_glue_column_to_arrow_field(
+                &Column::builder()
+                    .name("id")
+                    .r#type("varchar")
+                    .build()
+                    .unwrap()
+            )
+            .unwrap(),
+            Field::new("id", DataType::Utf8, true)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_map_decimal_glue_column_to_arrow_field() -> Result<()> {
+        assert_eq!(
+            GlueTable::map_glue_column_to_arrow_field(
+                &Column::builder()
+                    .name("id")
+                    .r#type("decimal(12,9)")
+                    .build()
+                    .unwrap()
+            )
+            .unwrap(),
+            Field::new("id", DataType::Decimal256(12, 9), true)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_map_array_of_bigint_glue_column_to_arrow_field() -> Result<()> {
+        assert_eq!(
+            GlueTable::map_glue_column_to_arrow_field(
+                &Column::builder()
+                    .name("id")
+                    .r#type("array<bigint>")
+                    .build()
+                    .unwrap()
+            )
+            .unwrap(),
+            Field::new(
+                "id",
+                DataType::List(Arc::new(Field::new("item", DataType::Int64, true))),
+                true
+            )
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_map_array_of_int_glue_column_to_arrow_field() -> Result<()> {
+        assert_eq!(
+            GlueTable::map_glue_column_to_arrow_field(
+                &Column::builder()
+                    .name("id")
+                    .r#type("array<int>")
+                    .build()
+                    .unwrap()
+            )
+            .unwrap(),
+            Field::new(
+                "id",
+                DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
+                true
+            )
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_map_array_of_array_of_string_glue_column_to_arrow_field() -> Result<()> {
+        assert_eq!(
+            GlueTable::map_glue_column_to_arrow_field(
+                &Column::builder()
+                    .name("id")
+                    .r#type("array<array<string>>")
+                    .build()
+                    .unwrap()
+            )
+            .unwrap(),
+            Field::new(
+                "id",
+                DataType::List(Arc::new(Field::new(
+                    "item",
+                    DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                    true
+                ),)),
+                true
+            )
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_map_struct_of_int_and_int_glue_column_to_arrow_field() -> Result<()> {
+        assert_eq!(
+            GlueTable::map_glue_column_to_arrow_field(
+                &Column::builder()
+                    .name("id")
+                    .r#type("struct<reply_id:int,next_id:int>")
+                    .build()
+                    .unwrap()
+            )
+            .unwrap(),
+            Field::new(
+                "id",
+                DataType::Struct(
+                    vec![
+                        Field::new("reply_id", DataType::Int32, true),
+                        Field::new("next_id", DataType::Int32, true),
+                    ]
+                    .into()
+                ),
+                true
+            )
+        );
+        Ok(())
+    }
+
+    //struct<reply:struct<reply_id:int>>
+    //array<struct<reply:struct<reply_id:int,next_id:int>,blog_id:bigint>>
+
+    #[test]
+    fn test_map_struct_of_struct_of_int_glue_column_to_arrow_field() -> Result<()> {
+        assert_eq!(
+            GlueTable::map_glue_column_to_arrow_field(
+                &Column::builder()
+                    .name("id")
+                    .r#type("struct<reply:struct<reply_id:int>>")
+                    .build()
+                    .unwrap()
+            )
+            .unwrap(),
+            Field::new(
+                "id",
+                DataType::Struct(
+                    vec![Field::new(
+                        "reply",
+                        DataType::Struct(
+                            vec![Field::new("reply_id", DataType::Int32, true),].into()
+                        ),
+                        true
+                    ),]
+                    .into()
+                ),
+                true
+            )
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_map_map_of_string_and_boolean_glue_column_to_arrow_field() -> Result<()> {
+        assert_eq!(
+            GlueTable::map_glue_column_to_arrow_field(
+                &Column::builder()
+                    .name("id")
+                    .r#type("map<string,boolean>")
+                    .build()
+                    .unwrap()
+            )
+            .unwrap(),
+            Field::new(
+                "id",
+                DataType::Map(
+                    Arc::new(Field::new(
+                        "key_value",
+                        DataType::Struct(
+                            vec![
+                                Field::new("key", DataType::Utf8, true),
+                                Field::new("value", DataType::Boolean, true),
+                            ]
+                            .into()
+                        ),
+                        true
+                    ),),
+                    true
+                ),
+                true
+            )
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_map_map_of_string_and_map_of_string_and_boolean_glue_column_to_arrow_field(
+    ) -> Result<()> {
+        assert_eq!(
+            GlueTable::map_glue_column_to_arrow_field(
+                &Column::builder()
+                    .name("id")
+                    .r#type("map<string,map<string,boolean>>")
+                    .build()
+                    .unwrap()
+            )
+            .unwrap(),
+            Field::new(
+                "id",
+                DataType::Map(
+                    Arc::new(Field::new(
+                        "key_value",
+                        DataType::Struct(
+                            vec![
+                                Field::new("key", DataType::Utf8, true),
+                                Field::new(
+                                    "value",
+                                    DataType::Map(
+                                        Arc::new(Field::new(
+                                            "key_value",
+                                            DataType::Struct(
+                                                vec![
+                                                    Field::new("key", DataType::Utf8, true),
+                                                    Field::new("value", DataType::Boolean, true),
+                                                ]
+                                                .into()
+                                            ),
+                                            true
+                                        ),),
+                                        true
+                                    ),
+                                    true
+                                ),
+                            ]
+                            .into()
+                        ),
+                        true
+                    ),),
+                    true
+                ),
+                true
+            )
         );
 
-        if partition >= self.partitions {
-            return internal_err!(
-                "EmptyExec invalid partition {} (expected less than {})",
-                partition,
-                self.partitions
-            );
-        }
-
-        Ok(Box::pin(MemoryStream::try_new(
-            self.data()?,
-            self.schema.clone(),
-            None,
-        )?))
+        Ok(())
     }
 
-    fn statistics(&self) -> Result<Statistics> {
-        let batch = self
-            .data()
-            .expect("Create empty RecordBatch should not fail");
-        Ok(compute_record_batch_statistics(
-            &[batch],
-            &self.schema,
-            None,
-        ))
+    #[test]
+    fn test_map_glue_data_type() -> Result<()> {
+        // simple types
+        assert_eq!(
+            GlueTable::map_glue_data_type("int").unwrap(),
+            DataType::Int32
+        );
+        assert_eq!(
+            GlueTable::map_glue_data_type("boolean").unwrap(),
+            DataType::Boolean
+        );
+        assert_eq!(
+            GlueTable::map_glue_data_type("bigint").unwrap(),
+            DataType::Int64
+        );
+        assert_eq!(
+            GlueTable::map_glue_data_type("float").unwrap(),
+            DataType::Float32
+        );
+        assert_eq!(
+            GlueTable::map_glue_data_type("double").unwrap(),
+            DataType::Float64
+        );
+        assert_eq!(
+            GlueTable::map_glue_data_type("binary").unwrap(),
+            DataType::Binary
+        );
+        assert_eq!(
+            GlueTable::map_glue_data_type("timestamp").unwrap(),
+            DataType::Timestamp(TimeUnit::Nanosecond, None)
+        );
+        assert_eq!(
+            GlueTable::map_glue_data_type("string").unwrap(),
+            DataType::Utf8
+        );
+
+        let list_of_string = DataType::List(Arc::new(Field::new("item", DataType::Utf8, true)));
+
+        // array type
+        assert_eq!(
+            GlueTable::map_glue_data_type("array<string>").unwrap(),
+            list_of_string
+        );
+        assert_eq!(
+            GlueTable::map_glue_data_type("array<array<string>>").unwrap(),
+            DataType::List(Arc::new(Field::new("item", list_of_string.clone(), true)))
+        );
+
+        let map_of_string_and_boolean = DataType::Map(
+            Arc::new(Field::new(
+                "key_value",
+                DataType::Struct(
+                    vec![
+                        Field::new("key", DataType::Utf8, true),
+                        Field::new("value", DataType::Boolean, true),
+                    ]
+                    .into(),
+                ),
+                true,
+            )),
+            true,
+        );
+
+        // map type
+        assert_eq!(
+            GlueTable::map_glue_data_type("map<string,boolean>").unwrap(),
+            map_of_string_and_boolean
+        );
+        assert_eq!(
+            GlueTable::map_glue_data_type("map<map<string,boolean>,array<string>>")
+                .unwrap(),
+            DataType::Map(
+                Arc::new(Field::new(
+                    "key_value",
+                    DataType::Struct(
+                        vec![
+                            Field::new("key", map_of_string_and_boolean, true),
+                            Field::new("value", list_of_string, true),
+                        ]
+                        .into()
+                    ),
+                    true
+                )),
+                true
+            )
+        );
+
+        let struct_of_int =
+            DataType::Struct(vec![Field::new("reply_id", DataType::Int32, true)].into());
+
+        // struct type
+        assert_eq!(
+            GlueTable::map_glue_data_type("struct<reply_id:int>").unwrap(),
+            struct_of_int
+        );
+        assert_eq!(
+            GlueTable::map_glue_data_type("struct<reply:struct<reply_id:int>>").unwrap(),
+            DataType::Struct(vec![Field::new("reply", struct_of_int, true)].into())
+        );
+
+        assert_eq!(
+            GlueTable::map_glue_data_type("decimal(12,9)").unwrap(),
+            DataType::Decimal256(12, 9)
+        );
+
+        Ok(())
     }
 }
