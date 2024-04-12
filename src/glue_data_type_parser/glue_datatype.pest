@@ -1,28 +1,33 @@
 // SPDX-License-Identifier: Apache-2.0
 
-DataType = _{ SimpleType | ArrayType | MapType | StructType }
+DataType = _{ " "* ~ (SimpleType | ArrayType | MapType | StructType) ~ " "*}
+
+LT = _{(" "* ~ "<" ~ " "*)}
+OP_BR = _{(" "* ~ "(" ~ " "*)}
+COMMA = _{(" "* ~ "," ~ " "*)}
+COLON = _{(" "* ~ ":" ~ " "*)}
+
 SimpleType = _{ TinyInt | SmallInt | Int | Boolean | BigInt | Float | Double | Binary | Date | Timestamp | String | Char | Varchar | Decimal }
-TinyInt = { "tinyint" }
-SmallInt = { "smallint" }
-Int = { "int" | "integer" }
-Boolean = { "boolean" }
-BigInt = { "bigint" }
-Float = { "float" }
-Double = { "double" }
-Binary = { "binary" }
-Date = { "date" }
-Timestamp = { "timestamp" }
-String = { "string" }
-Char = { "char" }
-Varchar = { "varchar" }
-Decimal = { "decimal(" ~ number ~ "," ~ number ~ ")" }
-ArrayType = { "array<" ~ DataType ~ ">" }
-MapType = { "map<" ~ DataType ~ "," ~ DataType ~ ">" }
-StructType = { "struct<" ~ structFields ~ ">" }
-structFields = _{ structField ~ ("," ~ structField)* }
-structField = { ident ~ ":" ~ DataType }
+TinyInt = { ^"tinyint" }
+SmallInt = { ^"smallint" }
+Int = { ^"int" | ^"integer" }
+Boolean = { ^"boolean" }
+BigInt = { ^"bigint" }
+Float = { ^"float" }
+Double = { ^"double" }
+Binary = { ^"binary" }
+Date = { ^"date" }
+Timestamp = { ^"timestamp" }
+String = { ^"string" }
+Char = { ^"char" }
+Varchar = { ^"varchar" }
+Decimal = { (^"decimal" ~ OP_BR) ~ number ~ COMMA ~ number ~ ")" }
+ArrayType = { (^"array" ~ LT) ~ DataType ~ ">" }
+MapType = { (^"map" ~ LT) ~ DataType ~ COMMA ~ DataType ~ ">" }
+StructType = { (^"struct" ~ LT) ~ structFields ~ ">" }
+structFields = _{ structField ~ (COMMA ~ structField)* }
+structField = { ident ~ COLON ~ DataType }
 alpha = _{ 'a'..'z' | 'A'..'Z' | "_" | "-" }
 number = { digit+ }
 digit = _{ '0'..'9' }
 ident = { (alpha | digit)+ }
-

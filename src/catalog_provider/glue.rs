@@ -17,6 +17,8 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use super::glue_table::GlueTable;
+
 /// Options to register a table
 pub enum TableRegistrationOptions {
     /// Derive schema from Glue table
@@ -123,6 +125,25 @@ impl GlueCatalogProvider {
 }
 
 impl GlueSchemaProvider {
+
+    fn is_supported(glue_table: &Table) -> bool {
+        let provider = Self::get_provider(glue_table);
+        if let Some("delta") = provider {
+            #[cfg(not(feature = "deltalake"))]
+            return false;
+            #[cfg(feature = "deltalake")]
+            return true
+        }
+        return GlueTable::is_supported(glue_table)
+    }
+
+    fn get_provider<'a>(glue_table: &'a Table) -> Option<&'a str> {
+        glue_table
+            .parameters()
+            .and_then(|f| f.get("spark.sql.sources.provider"))
+            .map(|s| s.as_str())
+    }
+
     async fn create_table(&self, glue_table: &Table) -> Result<Arc<dyn TableProvider>> {
         log::debug!("glue table: {:#?}", glue_table);
 
@@ -180,7 +201,7 @@ impl SchemaProvider for GlueSchemaProvider {
     }
 
     fn table_names(&self) -> Vec<String> {
-        self.tables.iter().map(|t| t.name().to_string()).collect()
+        self.tables.iter().filter(|t| GlueSchemaProvider::is_supported(t)).map(|t| t.name().to_string()).collect()
     }
 
     async fn table(

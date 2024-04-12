@@ -3,11 +3,13 @@
 //! This modules contains a Parser for Glue Data Types.
 use crate::error::GlueError;
 use crate::error::Result;
+use crate::glue_data_type_parser;
 
 /// Possible Glue data types
 /// Known sources:
 /// <https://docs.aws.amazon.com/glue/latest/dg/aws-glue-api-catalog-tables.html#aws-glue-api-catalog-tables-Column>
 /// <https://docs.aws.amazon.com/athena/latest/ug/data-types.html>
+#[derive(Debug, PartialEq)]
 pub enum GlueDataType {
     TinyInt,
     SmallInt,
@@ -29,6 +31,7 @@ pub enum GlueDataType {
 }
 
 /// Represents a Field in a Glue struct.
+#[derive(Debug, PartialEq)]
 pub struct GlueField {
     pub name: String,
     pub data_type: GlueDataType,
@@ -37,6 +40,8 @@ pub struct GlueField {
 /// Parse the string as a glue data type
 pub fn parse_glue_data_type(glue_data_type: &str) -> Result<GlueDataType> {
     use pest::Parser;
+
+    // let glue_data_type = glue_data_type.trim();
 
     let mut pairs = GlueDataTypeParser::parse(Rule::DataType, glue_data_type).map_err(|e| {
         GlueError::GlueDataTypeMapping(format!("Error while parsing {}: {:?}", glue_data_type, e))
@@ -180,3 +185,55 @@ pub fn parse_glue_data_type(glue_data_type: &str) -> Result<GlueDataType> {
 #[derive(pest_derive::Parser)]
 #[grammar = "glue_data_type_parser/glue_datatype.pest"]
 struct GlueDataTypeParser;
+
+//
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::GlueError;
+    use crate::error::Result;
+
+    #[test]
+    fn test_whitespaces() -> Result<()> {
+        let parsed = parse_glue_data_type("struct <ssid:int   , channel_id :string>")?;
+        let eq = parsed
+            == GlueDataType::Struct(vec![
+                GlueField {
+                    name: "ssid".to_string(),
+                    data_type: GlueDataType::Int,
+                },
+                GlueField {
+                    name: "channel_id".to_string(),
+                    data_type: GlueDataType::String,
+                },
+            ]);
+        if !eq {
+            return Err(GlueError::GlueDataTypeMapping(format!("parse error")));
+        }
+        println!("{:?}", parsed);
+        Ok(())
+    }
+
+    #[test]
+    fn test_uppercase() -> Result<()> {
+        let parsed = parse_glue_data_type("INTEGER")?;
+        let eq = parsed == GlueDataType::Int;
+        if !eq {
+            Err(GlueError::GlueDataTypeMapping(format!("parse error")))?;
+        }
+        Ok(())
+    }
+    #[test]
+    fn test_trim() -> Result<()> {
+        if !(parse_glue_data_type("  INT ")? == GlueDataType::Int) {
+            Err(GlueError::GlueDataTypeMapping(format!("parse error")))?;
+        }
+        Ok(())
+    }
+    #[test]
+    fn test_case1() -> Result<()> {
+        parse_glue_data_type("  ARRAY < STRUCT <evergreen_id: STRING,evergreen_content_offset: BIGINT,ts: BIGINT,duration: BIGINT,network: STRING,ssid: STRING,content_offset: BIGINT>>: GlueDataTypeMapping(\"Error while parsing ARRAY < STRUCT <evergreen_id: STRING,evergreen_content_offset: BIGINT,ts: BIGINT,duration: BIGINT,network: STRING,ssid: STRING,content_offset: BIGINT  > > ")?;
+        Ok(())
+    }
+}

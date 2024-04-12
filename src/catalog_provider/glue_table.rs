@@ -62,7 +62,7 @@ impl GlueTable {
         let table_name = table.name();
         let mut listing_options = Self::get_listing_options(database_name, table_name, &sd)?;
         let partitions = table.partition_keys();
-        let schema = Self::derive_schema(database_name, table_name, &table)?;
+        let schema = Self::derive_schema(&table)?;
         let fields = schema.fields().iter().as_slice();
         let part_cols = fields[(fields.len() - partitions.len())..]
             .iter()
@@ -140,7 +140,9 @@ impl GlueTable {
             .map_err(|e| Self::wrap_error_with_table_info(database_name, table_name, e))
     }
 
-    fn derive_schema(database_name: &str, table_name: &str, table: &Table) -> error::Result<Schema> {
+    fn derive_schema(table: &Table) -> error::Result<Schema> {
+        let database_name = Self::get_database_name(table)?;
+        let table_name = table.name();
         let sd = Self::get_storage_descriptor(table)?;
         let mut columns = Self::get_columns(&sd)?.clone();
         if let Some(part_keys) = &table.partition_keys {
@@ -188,6 +190,17 @@ impl GlueTable {
             }
             _ => e,
         }
+    }
+
+    pub fn is_supported(glue_table: &Table) -> bool {
+        let sd = Self::get_storage_descriptor(glue_table);
+        match sd {
+            Ok(sd) => {
+                Self::calculate_options(sd).is_ok() && Self::derive_schema(glue_table).is_ok()
+            }
+            _ => false
+        }
+        
     }
 
     fn calculate_options(sd: &StorageDescriptor) -> error::Result<ListingOptions> {
