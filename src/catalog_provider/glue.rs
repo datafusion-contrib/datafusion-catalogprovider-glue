@@ -136,7 +136,7 @@ impl GlueSchemaProvider {
             glue_table.database_name(),
             glue_table.name()
         );
-        // log::info!("{:#?}", glue_table);
+        log::debug!("{:#?}", glue_table);
         // return Ok(());
 
         let database_name = Self::get_database_name(glue_table)?;
@@ -160,10 +160,19 @@ impl GlueSchemaProvider {
             ));
         }
 
-        let sd = Self::get_storage_descriptor(glue_table)?;
-        let storage_location_uri = Self::get_storage_location(&sd)?;
+        if let Some(partitions) = &glue_table.partition_keys {
+            if !partitions.is_empty() {
+                return Err(GlueError::NotImplemented("partitioned tables are not implemented yet".into()))
+            }
+        }
 
+        let sd = Self::get_storage_descriptor(glue_table)?;
         let listing_options = Self::get_listing_options(database_name, table_name, &sd)?;
+
+        let mut storage_location_uri = Self::get_storage_location(&sd)?.to_string();
+        if !storage_location_uri.ends_with("/") && !storage_location_uri.ends_with(&listing_options.file_extension) {
+            storage_location_uri.push('/');
+        }
 
         let ltu = ListingTableUrl::parse(storage_location_uri)?;
         let ltc = ListingTableConfig::new(ltu);

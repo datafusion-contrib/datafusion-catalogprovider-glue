@@ -2,7 +2,7 @@
 edition = "2021"
 name = "datafusion-catalogprovider-glue"
 description = "Glue as a CatalogProvider for Datafusion"
-version = "0.2.0"
+version = "0.3.0"
 homepage = "https://github.com/datafusion-contrib/datafusion-catalogprovider-glue"
 repository = "https://github.com/datafusion-contrib/datafusion-catalogprovider-glue"
 readme = "README.md"
