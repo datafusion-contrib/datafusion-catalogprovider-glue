@@ -1,6 +1,8 @@
+use datafusion::error::DataFusionError;
 // SPDX-License-Identifier: Apache-2.0
 use log;
 
+use crate::catalog_provider::glue;
 use crate::error::*;
 use crate::glue_data_type_parser::*;
 use async_trait::async_trait;
@@ -160,17 +162,50 @@ impl GlueSchemaProvider {
             ));
         }
 
-        if let Some(partitions) = &glue_table.partition_keys {
-            if !partitions.is_empty() {
-                return Err(GlueError::NotImplemented("partitioned tables are not implemented yet".into()))
-            }
-        }
-
         let sd = Self::get_storage_descriptor(glue_table)?;
         let listing_options = Self::get_listing_options(database_name, table_name, &sd)?;
 
+        if let Some(partitions) = &glue_table.partition_keys {
+            let builder = self.client.get_partitions();
+            let resp = builder
+                .database_name(glue_table.database_name().unwrap())
+                .table_name(glue_table.name())
+                .send()
+                .await?;
+            let partition_locations = resp
+                .partitions()
+                .iter()
+                .flat_map(|p| p.storage_descriptor())
+                .flat_map(|x| x.location())
+                .collect::<Vec<_>>();
+
+            let table_urls = partition_locations
+                .iter()
+                .map(|loc| {
+                    let mut loc = loc.to_string();
+                    if !loc.ends_with("/") && !loc.ends_with(&listing_options.file_extension) {
+                        loc.push('/');
+                    }
+                    ListingTableUrl::parse(loc)
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            let ltc = ListingTableConfig::new_with_multi_paths(table_urls);
+            let ltc_with_lo = ltc.with_listing_options(listing_options);
+            let schema = Self::derive_schema(database_name, table_name, &sd)?;
+
+            let ltc_with_lo_and_schema = ltc_with_lo.with_schema(SchemaRef::new(schema));
+
+            let listing_table = ListingTable::try_new(ltc_with_lo_and_schema)?;
+            return Ok(Arc::new(listing_table));
+            // if !partitions.is_empty() {
+            //     return Err(GlueError::NotImplemented("partitioned tables are not implemented yet".into()))
+            // }
+        }
+
         let mut storage_location_uri = Self::get_storage_location(&sd)?.to_string();
-        if !storage_location_uri.ends_with("/") && !storage_location_uri.ends_with(&listing_options.file_extension) {
+        if !storage_location_uri.ends_with("/")
+            && !storage_location_uri.ends_with(&listing_options.file_extension)
+        {
             storage_location_uri.push('/');
         }
 
