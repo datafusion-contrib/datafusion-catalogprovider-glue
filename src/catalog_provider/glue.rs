@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 use log;
 
-use crate::catalog_provider::glue_table;
-use crate::error::*;
+use crate::{catalog_provider::glue_table, error::GlueError};
 
 use async_trait::async_trait;
 use aws_sdk_glue::types::Table;
@@ -11,6 +10,7 @@ use aws_types::SdkConfig;
 use datafusion::{
     catalog::{schema::SchemaProvider, CatalogProvider},
     datasource::TableProvider,
+    error::Result,
     execution::object_store::ObjectStoreRegistry,
 };
 use std::any::Any;
@@ -71,12 +71,12 @@ impl GlueCatalogConfig {
 
 impl GlueCatalogProvider {
     /// Convenience wrapper for creating a new `GlueCatalogProvider` using default configuration options.  Only works with AWS.
-    pub async fn default() -> Result<Self> {
+    pub async fn default() -> crate::error::Result<Self> {
         GlueCatalogProvider::new(GlueCatalogConfig::default()).await
     }
 
     /// Create a new Glue CatalogProvider
-    pub async fn new(config: GlueCatalogConfig) -> Result<Self> {
+    pub async fn new(config: GlueCatalogConfig) -> crate::error::Result<Self> {
         let client = match &config.sdk_config {
             Some(sdk_config) => Client::new(sdk_config),
             None => {
@@ -139,13 +139,15 @@ impl GlueSchemaProvider {
             )
             .await;
             #[cfg(not(feature = "deltalake"))]
-            return Err(GlueError::DeltaLake(
+            Err(GlueError::DeltaLake(
                 "DeltaLake support is not enabled".to_string(),
-            ));
+            ))?;
         }
 
-        return Ok(Arc::new(glue_table::GlueTable::new(glue_table.clone(), self.client.clone())?))
-  
+        return Ok(Arc::new(glue_table::GlueTable::new(
+            glue_table.clone(),
+            self.client.clone(),
+        )?));
     }
 }
 
@@ -181,17 +183,16 @@ impl SchemaProvider for GlueSchemaProvider {
         self.tables.iter().map(|t| t.name().to_string()).collect()
     }
 
-    async fn table(&self, name: &str) -> Option<Arc<dyn datafusion::datasource::TableProvider>> {
-        let table = self.tables.iter().find(|t| t.name() == name)?;
-        let ret = self
-            .create_table(table)
-            .await
-            .map_err(|err| {
-                log::warn!("{:?}", err);
-                err
-            })
-            .ok();
-        ret
+    async fn table(
+        &self,
+        name: &str,
+    ) -> Result<Option<Arc<dyn datafusion::datasource::TableProvider>>> {
+        let table = self
+            .tables
+            .iter()
+            .find(|t| t.name() == name)
+            .ok_or_else(|| GlueError::AWS(format!("table {name} not found")))?;
+        self.create_table(table).await.map(|t| Some(t))
     }
 
     fn table_exist(&self, name: &str) -> bool {

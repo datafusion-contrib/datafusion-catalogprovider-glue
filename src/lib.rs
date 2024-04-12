@@ -17,4 +17,4 @@ pub mod catalog_provider;
 /// Module which contains parser logic for Glue data types
 mod glue_data_type_parser;
 
-mod empty_exec;
+// mod empty_exec;
