@@ -7,19 +7,19 @@ use async_trait::async_trait;
 use aws_sdk_glue::types::{Column, StorageDescriptor, Table};
 use aws_sdk_glue::Client;
 use aws_types::SdkConfig;
-use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
-use datafusion::catalog::schema::SchemaProvider;
-use datafusion::catalog::CatalogProvider;
-use datafusion::common::GetExt;
-use datafusion::datasource::file_format::avro::AvroFormat;
-use datafusion::datasource::file_format::csv::CsvFormat;
-use datafusion::datasource::file_format::json::JsonFormat;
-use datafusion::datasource::file_format::parquet::ParquetFormat;
-use datafusion::datasource::file_format::FileFormat;
-use datafusion::datasource::listing::{
-    ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
+use datafusion::datasource::{
+    file_format::{
+        avro::AvroFormat, csv::CsvFormat, json::JsonFormat, parquet::ParquetFormat, FileFormat,
+    },
+    listing::{ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl},
+    TableProvider,
 };
-use datafusion::datasource::TableProvider;
+use datafusion::{
+    arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit},
+    catalog::{schema::SchemaProvider, CatalogProvider},
+    common::GetExt,
+    execution::object_store::ObjectStoreRegistry,
+};
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -37,6 +37,7 @@ pub enum TableRegistrationOptions {
 pub struct GlueSchemaProvider {
     client: Client,
     tables: Vec<Table>,
+    object_store_registry: Option<Arc<dyn ObjectStoreRegistry>>,
 }
 
 /// `CatalogProvider` implementation for the Amazon Glue API
@@ -48,6 +49,7 @@ pub struct GlueCatalogProvider {
 #[derive(Default)]
 pub struct GlueCatalogConfig {
     databases: Vec<String>,
+    object_store_registry: Option<Arc<dyn ObjectStoreRegistry>>,
     sdk_config: Option<SdkConfig>,
 }
 
@@ -61,6 +63,15 @@ impl GlueCatalogConfig {
     /// Provide sdk_config
     pub fn with_sdk_config(mut self, sdk_config: SdkConfig) -> Self {
         self.sdk_config = Some(sdk_config);
+        self
+    }
+
+    /// Provide object store registry
+    pub fn with_object_store_registry(
+        mut self,
+        object_store_registry: Arc<dyn ObjectStoreRegistry>,
+    ) -> Self {
+        self.object_store_registry = Some(object_store_registry);
         self
     }
 }
@@ -107,6 +118,7 @@ impl GlueCatalogProvider {
                 Arc::new(GlueSchemaProvider {
                     client: client.clone(),
                     tables,
+                    object_store_registry: config.object_store_registry.clone(),
                 }) as Arc<dyn SchemaProvider>,
             );
         }
@@ -129,6 +141,24 @@ impl GlueSchemaProvider {
 
         let database_name = Self::get_database_name(glue_table)?;
         let table_name = glue_table.name();
+
+        let provider = glue_table
+            .parameters()
+            .and_then(|f| f.get("spark.sql.sources.provider"))
+            .map(|s| s.as_str());
+
+        if let Some("delta") = provider {
+            #[cfg(feature = "deltalake")]
+            return crate::catalog_provider::delta_table::create_delta_table(
+                glue_table,
+                &self.object_store_registry,
+            )
+            .await;
+            #[cfg(not(feature = "deltalake"))]
+            return Err(GlueError::DeltaLake(
+                "DeltaLake support is not enabled".to_string(),
+            ));
+        }
 
         let sd = Self::get_storage_descriptor(glue_table)?;
         let storage_location_uri = Self::get_storage_location(&sd)?;

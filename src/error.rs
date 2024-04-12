@@ -18,6 +18,8 @@ pub enum GlueError {
     DataFusion(DataFusionError),
     /// Error during mapping of GlueDataType
     GlueDataTypeMapping(String),
+    /// Wrapper for DeltaLake errors
+    DeltaLake(String),
 }
 
 impl Display for GlueError {
@@ -28,7 +30,8 @@ impl Display for GlueError {
             GlueError::DataFusion(e) => e.fmt(f),
             GlueError::GlueDataTypeMapping(desc) => {
                 write!(f, "Could not map glue data type: {}", desc)
-            }
+            },
+            GlueError::DeltaLake(desc) => write!(f, "DeltaLake error: {}", desc),
         }
     }
 }
