@@ -5,3 +5,5 @@ pub mod glue;
 
 #[cfg(feature = "deltalake")]
 pub mod delta_table;
+
+pub mod glue_table;

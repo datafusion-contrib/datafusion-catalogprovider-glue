@@ -1,25 +1,25 @@
-use datafusion::error::DataFusionError;
 // SPDX-License-Identifier: Apache-2.0
 use log;
 
-use crate::catalog_provider::glue;
+use crate::catalog_provider::glue_table;
 use crate::error::*;
 use crate::glue_data_type_parser::*;
+
 use async_trait::async_trait;
 use aws_sdk_glue::types::{Column, StorageDescriptor, Table};
 use aws_sdk_glue::Client;
 use aws_types::SdkConfig;
-use datafusion::datasource::{
-    file_format::{
-        avro::AvroFormat, csv::CsvFormat, json::JsonFormat, parquet::ParquetFormat, FileFormat,
-    },
-    listing::{ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl},
-    TableProvider,
-};
 use datafusion::{
-    arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit},
+    arrow::datatypes::{DataType, Field, Schema, TimeUnit},
     catalog::{schema::SchemaProvider, CatalogProvider},
     common::GetExt,
+    datasource::{
+        file_format::{
+            avro::AvroFormat, csv::CsvFormat, json::JsonFormat, parquet::ParquetFormat, FileFormat,
+        },
+        listing::ListingOptions,
+        TableProvider,
+    },
     execution::object_store::ObjectStoreRegistry,
 };
 use std::any::Any;
@@ -134,13 +134,10 @@ impl GlueCatalogProvider {
 impl GlueSchemaProvider {
     async fn create_table(&self, glue_table: &Table) -> Result<Arc<dyn TableProvider>> {
         log::info!(
-            "glue db: {:?}, table: {:?}",
+            "glue db: {:?}, table: {:#?}",
             glue_table.database_name(),
             glue_table.name()
         );
-        log::debug!("{:#?}", glue_table);
-        // return Ok(());
-
         let database_name = Self::get_database_name(glue_table)?;
         let table_name = glue_table.name();
 
@@ -162,74 +159,8 @@ impl GlueSchemaProvider {
             ));
         }
 
-        let sd = Self::get_storage_descriptor(glue_table)?;
-        let listing_options = Self::get_listing_options(database_name, table_name, &sd)?;
-
-        if let Some(partitions) = &glue_table.partition_keys {
-            let builder = self.client.get_partitions();
-            let mut resp = builder
-                .database_name(glue_table.database_name().unwrap())
-                .table_name(glue_table.name())
-                .into_paginator()
-                .send();
-
-            let mut partition_locations = vec![];
-
-            while let Some(resp) = resp.next().await {
-                let resp = resp?;
-                partition_locations.extend(
-                    resp.partitions()
-                        .iter()
-                        .flat_map(|p| p.storage_descriptor())
-                        .flat_map(|x| x.location())
-                        .map(|loc| {
-                            let mut loc = loc.to_string();
-                            if !loc.ends_with("/")
-                                && !loc.ends_with(&listing_options.file_extension)
-                            {
-                                loc.push('/');
-                            }
-                            loc
-                        }),
-                );
-                log::info!("num of parts: {}", partition_locations.len());
-            }
-
-            let table_urls = partition_locations
-                .iter()
-                .map(ListingTableUrl::parse)
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            let ltc = ListingTableConfig::new_with_multi_paths(table_urls);
-            let ltc_with_lo = ltc.with_listing_options(listing_options);
-            let schema = Self::derive_schema(database_name, table_name, &sd)?;
-
-            let ltc_with_lo_and_schema = ltc_with_lo.with_schema(SchemaRef::new(schema));
-
-            let listing_table = ListingTable::try_new(ltc_with_lo_and_schema)?;
-            return Ok(Arc::new(listing_table));
-            // if !partitions.is_empty() {
-            //     return Err(GlueError::NotImplemented("partitioned tables are not implemented yet".into()))
-            // }
-        }
-
-        let mut storage_location_uri = Self::get_storage_location(&sd)?.to_string();
-        if !storage_location_uri.ends_with("/")
-            && !storage_location_uri.ends_with(&listing_options.file_extension)
-        {
-            storage_location_uri.push('/');
-        }
-
-        let ltu = ListingTableUrl::parse(storage_location_uri)?;
-        let ltc = ListingTableConfig::new(ltu);
-        let ltc_with_lo = ltc.with_listing_options(listing_options);
-
-        let schema = Self::derive_schema(database_name, table_name, &sd)?;
-
-        let ltc_with_lo_and_schema = ltc_with_lo.with_schema(SchemaRef::new(schema));
-
-        let listing_table = ListingTable::try_new(ltc_with_lo_and_schema)?;
-
-        Ok(Arc::new(listing_table))
+        return Ok(Arc::new(glue_table::GlueTable::new(glue_table.clone(), self.client.clone())?))
+  
     }
 
     fn get_listing_options(
@@ -241,13 +172,13 @@ impl GlueSchemaProvider {
             .map_err(|e| Self::wrap_error_with_table_info(database_name, table_name, e))
     }
 
-    fn derive_schema(
-        database_name: &str,
-        table_name: &str,
-        sd: &StorageDescriptor,
-    ) -> Result<Schema> {
-        let columns = Self::get_columns(sd)?;
-        Self::map_glue_columns_to_arrow_schema(columns)
+    fn derive_schema(database_name: &str, table_name: &str, table: &Table) -> Result<Schema> {
+        let sd = Self::get_storage_descriptor(table)?;
+        let mut columns = Self::get_columns(&sd)?.clone();
+        if let Some(part_keys) = &table.partition_keys {
+            columns.extend(part_keys.iter().cloned());
+        }
+        Self::map_glue_columns_to_arrow_schema(&columns)
             .map_err(|e| Self::wrap_error_with_table_info(database_name, table_name, e))
     }
 
@@ -520,13 +451,16 @@ impl SchemaProvider for GlueSchemaProvider {
 
     async fn table(&self, name: &str) -> Option<Arc<dyn datafusion::datasource::TableProvider>> {
         let table = self.tables.iter().find(|t| t.name() == name)?;
-        self.create_table(table)
+        let ret = self
+            .create_table(table)
             .await
             .map_err(|err| {
                 log::warn!("{:?}", err);
                 err
             })
-            .ok()
+            .ok();
+        println!("table {} created", name);
+        ret
     }
 
     fn table_exist(&self, name: &str) -> bool {
