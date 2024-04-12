@@ -167,27 +167,37 @@ impl GlueSchemaProvider {
 
         if let Some(partitions) = &glue_table.partition_keys {
             let builder = self.client.get_partitions();
-            let resp = builder
+            let mut resp = builder
                 .database_name(glue_table.database_name().unwrap())
                 .table_name(glue_table.name())
-                .send()
-                .await?;
-            let partition_locations = resp
-                .partitions()
-                .iter()
-                .flat_map(|p| p.storage_descriptor())
-                .flat_map(|x| x.location())
-                .collect::<Vec<_>>();
+                .into_paginator()
+                .send();
+
+            let mut partition_locations = vec![];
+
+            while let Some(resp) = resp.next().await {
+                let resp = resp?;
+                partition_locations.extend(
+                    resp.partitions()
+                        .iter()
+                        .flat_map(|p| p.storage_descriptor())
+                        .flat_map(|x| x.location())
+                        .map(|loc| {
+                            let mut loc = loc.to_string();
+                            if !loc.ends_with("/")
+                                && !loc.ends_with(&listing_options.file_extension)
+                            {
+                                loc.push('/');
+                            }
+                            loc
+                        }),
+                );
+                log::info!("num of parts: {}", partition_locations.len());
+            }
 
             let table_urls = partition_locations
                 .iter()
-                .map(|loc| {
-                    let mut loc = loc.to_string();
-                    if !loc.ends_with("/") && !loc.ends_with(&listing_options.file_extension) {
-                        loc.push('/');
-                    }
-                    ListingTableUrl::parse(loc)
-                })
+                .map(ListingTableUrl::parse)
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             let ltc = ListingTableConfig::new_with_multi_paths(table_urls);
             let ltc_with_lo = ltc.with_listing_options(listing_options);
