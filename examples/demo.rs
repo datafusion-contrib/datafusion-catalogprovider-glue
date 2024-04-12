@@ -15,15 +15,16 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use aws_types::credentials::ProvideCredentials;
-use aws_types::{Credentials, SdkConfig};
+use aws_sdk_glue::config::{Credentials, ProvideCredentials};
+use aws_types::SdkConfig;
 use datafusion::arrow::array::StringArray;
 use datafusion::common::{DataFusionError, Result};
-use datafusion::datasource::object_store::{ObjectStoreProvider, ObjectStoreRegistry};
+use datafusion::datasource::object_store::ObjectStoreRegistry;
+use datafusion::execution::object_store::DefaultObjectStoreRegistry;
 use datafusion::execution::runtime_env::{RuntimeConfig, RuntimeEnv};
 use datafusion::prelude::*;
 use datafusion_catalogprovider_glue::catalog_provider::glue::{
-    GlueCatalogProvider, TableRegistrationOptions,
+    GlueCatalogConfig, GlueCatalogProvider,
 };
 use object_store::aws::AmazonS3Builder;
 use object_store::ObjectStore;
@@ -32,32 +33,20 @@ use url::Url;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    env_logger::init();
     // Load an aws sdk config from the environment
-    let sdk_config = aws_config::load_from_env().await;
+    let sdk_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
 
     // Register an object store provider which creates instances for each requested s3://bucket using the sdk_config credentials
     // As an alternative you can also manually register the required object_store(s)
     let object_store_provider = Arc::new(DemoS3ObjectStoreProvider::new(&sdk_config).await?);
-    let object_store_registry = Arc::new(ObjectStoreRegistry::new_with_provider(Some(
-        object_store_provider,
-    )));
-    let runtime_config = RuntimeConfig::default().with_object_store_registry(object_store_registry);
+    let runtime_config = RuntimeConfig::default().with_object_store_registry(object_store_provider);
     let config = SessionConfig::new().with_information_schema(true);
     let runtime = Arc::new(RuntimeEnv::new(runtime_config)?);
-    let ctx = SessionContext::with_config_rt(config, runtime);
+    let ctx = SessionContext::new_with_config_rt(config, runtime);
 
-    let mut glue_catalog_provider = GlueCatalogProvider::new(&sdk_config);
-
-    let register_results = glue_catalog_provider
-        .register_all_with_options(&TableRegistrationOptions::InferSchemaFromData, &ctx.state())
-        .await?;
-    for result in register_results {
-        if result.is_err() {
-            // only output tables which were not registered...
-            println!("{:?}", result);
-        }
-    }
-
+    let glue_config = GlueCatalogConfig::default().with_sdk_config(sdk_config);
+    let glue_catalog_provider = GlueCatalogProvider::new(glue_config).await?;
     ctx.register_catalog("glue", Arc::new(glue_catalog_provider));
 
     ctx.sql("select * from information_schema.tables")
@@ -117,7 +106,9 @@ async fn sample(ctx: SessionContext, schema: &str, table: &str, limit: usize) ->
     Ok(())
 }
 
+#[derive(Debug)]
 pub struct DemoS3ObjectStoreProvider {
+    registry: DefaultObjectStoreRegistry,
     credentials: Credentials,
     region: String,
 }
@@ -137,6 +128,7 @@ impl DemoS3ObjectStoreProvider {
             .unwrap_or_else(|| "eu-central-1".to_string());
 
         Ok(DemoS3ObjectStoreProvider {
+            registry: DefaultObjectStoreRegistry::default(),
             credentials,
             region,
         })
@@ -171,8 +163,26 @@ fn get_host_name(url: &Url) -> Result<&str> {
 }
 
 /// ObjectStoreProvider for S3
-impl ObjectStoreProvider for DemoS3ObjectStoreProvider {
-    fn get_by_url(&self, url: &Url) -> Option<Arc<dyn ObjectStore>> {
-        self.build_s3_object_store(url).ok()
+impl ObjectStoreRegistry for DemoS3ObjectStoreProvider {
+    fn register_store(
+        &self,
+        url: &Url,
+        store: Arc<dyn ObjectStore>,
+    ) -> Option<Arc<dyn ObjectStore>> {
+        self.registry.register_store(url, store)
+    }
+
+    fn get_store(&self, url: &Url) -> Result<Arc<dyn ObjectStore>> {
+        let mut result = self.registry.get_store(url);
+        match result {
+            Ok(_) => (),
+            Err(_) => {
+                result = self.build_s3_object_store(url);
+                if let Ok(store) = &result {
+                    self.register_store(url, store.clone());
+                }
+            }
+        }
+        return result;
     }
 }

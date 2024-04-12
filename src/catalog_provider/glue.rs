@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
+use log;
 
 use crate::error::*;
 use crate::glue_data_type_parser::*;
-use aws_sdk_glue::model::{Column, StorageDescriptor, Table};
+use async_trait::async_trait;
+use aws_sdk_glue::types::{Column, StorageDescriptor, Table};
 use aws_sdk_glue::Client;
 use aws_types::SdkConfig;
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
-use datafusion::catalog::catalog::CatalogProvider;
-use datafusion::catalog::schema::{MemorySchemaProvider, SchemaProvider};
+use datafusion::catalog::schema::SchemaProvider;
+use datafusion::catalog::CatalogProvider;
 use datafusion::datasource::file_format::avro::AvroFormat;
 use datafusion::datasource::file_format::csv::CsvFormat;
 use datafusion::datasource::file_format::json::JsonFormat;
@@ -16,7 +18,7 @@ use datafusion::datasource::file_format::FileFormat;
 use datafusion::datasource::listing::{
     ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
 };
-use datafusion::execution::context::SessionState;
+use datafusion::datasource::TableProvider;
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -29,191 +31,120 @@ pub enum TableRegistrationOptions {
     InferSchemaFromData,
 }
 
+/// `SchemaProvider` implementation for Amazon Glue API
+#[allow(dead_code)]
+pub struct GlueSchemaProvider {
+    client: Client,
+    tables: Vec<Table>,
+}
+
 /// `CatalogProvider` implementation for the Amazon Glue API
 pub struct GlueCatalogProvider {
-    client: Client,
-    schema_provider_by_database: HashMap<String, Arc<MemorySchemaProvider>>,
+    schema_provider_by_database: HashMap<String, Arc<dyn SchemaProvider>>,
+}
+
+/// Configuration
+#[derive(Default)]
+pub struct GlueCatalogConfig {
+    databases: Vec<String>,
+    sdk_config: Option<SdkConfig>,
+}
+
+impl GlueCatalogConfig {
+    /// Limit to specified databases
+    pub fn with_databases(mut self, databases: &[&str]) -> Self {
+        self.databases = databases.iter().map(|db| db.to_string()).collect();
+        self
+    }
+
+    /// Provide sdk_config
+    pub fn with_sdk_config(mut self, sdk_config: SdkConfig) -> Self {
+        self.sdk_config = Some(sdk_config);
+        self
+    }
 }
 
 impl GlueCatalogProvider {
     /// Convenience wrapper for creating a new `GlueCatalogProvider` using default configuration options.  Only works with AWS.
-    pub async fn default() -> Self {
-        let shared_config = aws_config::load_from_env().await;
-        GlueCatalogProvider::new(&shared_config)
+    pub async fn default() -> Result<Self> {
+        GlueCatalogProvider::new(GlueCatalogConfig::default()).await
     }
 
     /// Create a new Glue CatalogProvider
-    pub fn new(sdk_config: &SdkConfig) -> Self {
-        let client = Client::new(sdk_config);
-        let schema_provider_by_database = HashMap::new();
-        GlueCatalogProvider {
-            client,
-            schema_provider_by_database,
-        }
-    }
+    pub async fn new(config: GlueCatalogConfig) -> Result<Self> {
+        let client = match &config.sdk_config {
+            Some(sdk_config) => Client::new(sdk_config),
+            None => {
+                Client::new(&aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await)
+            }
+        };
+        let mut schema_provider_by_database = HashMap::new();
 
-    /// Register the table with the given database and table name
-    pub async fn register_table(
-        &mut self,
-        database: &str,
-        table: &str,
-        ctx: &SessionState,
-    ) -> Result<()> {
-        self.register_table_with_options(
-            database,
-            table,
-            &TableRegistrationOptions::DeriveSchemaFromGlueTable,
-            ctx,
-        )
-        .await
-    }
-
-    /// Register the table with the given database name, table name and options
-    pub async fn register_table_with_options(
-        &mut self,
-        database: &str,
-        table: &str,
-        table_registration_options: &TableRegistrationOptions,
-        ctx: &SessionState,
-    ) -> Result<()> {
-        let glue_table = self
-            .client
-            .get_table()
-            .set_database_name(Some(database.to_string()))
-            .set_name(Some(table.to_string()))
-            .send()
-            .await?
-            .table
-            .ok_or_else(|| GlueError::AWS(format!("Did not find table {}.{}", database, table)))?;
-
-        self.register_glue_table(&glue_table, table_registration_options, ctx)
-            .await
-    }
-
-    /// Register all tables in the given glue database
-    pub async fn register_tables(
-        &mut self,
-        database: &str,
-        ctx: &SessionState,
-    ) -> Result<Vec<Result<()>>> {
-        self.register_tables_with_options(
-            database,
-            &TableRegistrationOptions::DeriveSchemaFromGlueTable,
-            ctx,
-        )
-        .await
-    }
-
-    /// Register all tables in the given glue database
-    pub async fn register_tables_with_options(
-        &mut self,
-        database: &str,
-        table_registration_options: &TableRegistrationOptions,
-        ctx: &SessionState,
-    ) -> Result<Vec<Result<()>>> {
-        let glue_tables = self
-            .client
-            .get_tables()
-            .set_database_name(Some(database.to_string()))
-            .send()
-            .await?
-            .table_list
-            .ok_or_else(|| {
-                GlueError::AWS(format!("Did not find table list in database {}", database))
-            })?;
-
-        let mut results = Vec::new();
-        for glue_table in glue_tables {
-            let result = self
-                .register_glue_table(&glue_table, table_registration_options, ctx)
-                .await;
-            results.push(result);
-        }
-
-        Ok(results)
-    }
-
-    /// Register all tables in all glue databases
-    pub async fn register_all(&mut self, ctx: &SessionState) -> Result<Vec<Result<()>>> {
-        self.register_all_with_options(&TableRegistrationOptions::DeriveSchemaFromGlueTable, ctx)
-            .await
-    }
-
-    /// Register all tables in all glue databases
-    pub async fn register_all_with_options(
-        &mut self,
-        table_registration_options: &TableRegistrationOptions,
-        ctx: &SessionState,
-    ) -> Result<Vec<Result<()>>> {
-        let glue_databases = self
-            .client
+        let glue_databases = client
             .get_databases()
             .send()
             .await?
             .database_list
-            .ok_or_else(|| GlueError::AWS("Did not find database list".to_string()))?;
+            .iter()
+            .filter(|db| config.databases.is_empty() || config.databases.contains(&db.name))
+            .cloned()
+            .collect::<Vec<_>>();
 
-        let mut results = Vec::new();
         for glue_database in glue_databases {
-            let database = glue_database
-                .name
-                .ok_or_else(|| GlueError::AWS("Failed to find name for database".to_string()))?;
-            let glue_tables = self
-                .client
+            let database = &glue_database.name;
+            let tables = client
                 .get_tables()
-                .database_name(&database)
+                .database_name(database)
                 .send()
                 .await?
                 .table_list
                 .ok_or_else(|| {
                     GlueError::AWS(format!("Did not find table list in database {}", database))
                 })?;
-
-            for glue_table in glue_tables {
-                let result = self
-                    .register_glue_table(&glue_table, table_registration_options, ctx)
-                    .await;
-                results.push(result);
-            }
+            schema_provider_by_database.insert(
+                database.to_string(),
+                Arc::new(GlueSchemaProvider {
+                    client: client.clone(),
+                    tables,
+                }) as Arc<dyn SchemaProvider>,
+            );
         }
 
-        Ok(results)
+        Ok(GlueCatalogProvider {
+            schema_provider_by_database,
+        })
     }
+}
 
-    async fn register_glue_table(
-        &mut self,
-        glue_table: &Table,
-        table_registration_options: &TableRegistrationOptions,
-        ctx: &SessionState,
-    ) -> Result<()> {
+impl GlueSchemaProvider {
+    async fn create_table(&self, glue_table: &Table) -> Result<Arc<dyn TableProvider>> {
+        log::info!(
+            "glue db: {:?}, table: {:?}",
+            glue_table.database_name(),
+            glue_table.name()
+        );
+        // log::info!("{:#?}", glue_table);
+        // return Ok(());
+
         let database_name = Self::get_database_name(glue_table)?;
-        let table_name = Self::get_table_name(glue_table)?;
+        let table_name = glue_table.name();
 
         let sd = Self::get_storage_descriptor(glue_table)?;
         let storage_location_uri = Self::get_storage_location(&sd)?;
 
         let listing_options = Self::get_listing_options(database_name, table_name, &sd)?;
 
-        let schema_provider_for_database = self.ensure_schema_provider_for_database(database_name);
-
         let ltu = ListingTableUrl::parse(storage_location_uri)?;
         let ltc = ListingTableConfig::new(ltu);
         let ltc_with_lo = ltc.with_listing_options(listing_options);
 
-        let ltc_with_lo_and_schema = match table_registration_options {
-            TableRegistrationOptions::DeriveSchemaFromGlueTable => {
-                let schema = Self::derive_schema(database_name, table_name, &sd)?;
-                ltc_with_lo.with_schema(SchemaRef::new(schema))
-            }
-            TableRegistrationOptions::InferSchemaFromData => ltc_with_lo.infer_schema(ctx).await?,
-        };
+        let schema = Self::derive_schema(database_name, table_name, &sd)?;
+
+        let ltc_with_lo_and_schema = ltc_with_lo.with_schema(SchemaRef::new(schema));
 
         let listing_table = ListingTable::try_new(ltc_with_lo_and_schema)?;
 
-        schema_provider_for_database
-            .register_table(table_name.to_string(), Arc::new(listing_table))?;
-
-        Ok(())
+        Ok(Arc::new(listing_table))
     }
 
     fn get_listing_options(
@@ -223,18 +154,6 @@ impl GlueCatalogProvider {
     ) -> Result<ListingOptions> {
         Self::calculate_options(sd)
             .map_err(|e| Self::wrap_error_with_table_info(database_name, table_name, e))
-    }
-
-    fn ensure_schema_provider_for_database(
-        &mut self,
-        database_name: &str,
-    ) -> &mut Arc<MemorySchemaProvider> {
-        self.schema_provider_by_database
-            .entry(database_name.to_string())
-            .or_insert_with(|| {
-                let instance = MemorySchemaProvider::new();
-                Arc::new(instance)
-            })
     }
 
     fn derive_schema(
@@ -272,13 +191,6 @@ impl GlueCatalogProvider {
             .database_name
             .as_deref()
             .ok_or_else(|| GlueError::AWS("Failed to find name for glue database".to_string()))
-    }
-
-    fn get_table_name(glue_table: &Table) -> Result<&str> {
-        glue_table
-            .name
-            .as_deref()
-            .ok_or_else(|| GlueError::AWS("Failed to find name for glue table".to_string()))
     }
 
     fn wrap_error_with_table_info(
@@ -380,11 +292,13 @@ impl GlueCatalogProvider {
         let format = format_result?;
 
         let listing_options = ListingOptions {
-            file_extension: String::new(),
+            file_extension: "".to_string(),
             format: Arc::from(format),
             table_partition_cols: vec![],
             collect_stat: true,
             target_partitions: 1,
+            file_sort_order: vec![],
+            file_type_write_options: None,
         };
 
         Ok(listing_options)
@@ -406,12 +320,12 @@ impl GlueCatalogProvider {
             GlueDataType::Varchar => Ok(DataType::Utf8),
             GlueDataType::Date => Ok(DataType::Date32),
             GlueDataType::Decimal(precision, scale) => {
-                Ok(DataType::Decimal256(*precision as u8, *scale as u8))
+                Ok(DataType::Decimal256(*precision as u8, *scale as i8))
             }
             GlueDataType::Array(inner_data_type) => {
                 let array_arrow_data_type =
                     Self::map_glue_data_type_to_arrow_data_type(inner_data_type)?;
-                Ok(DataType::List(Box::new(Field::new(
+                Ok(DataType::List(Arc::new(Field::new(
                     "item",
                     array_arrow_data_type,
                     true,
@@ -423,12 +337,15 @@ impl GlueCatalogProvider {
                 let value_arrow_data_type =
                     Self::map_glue_data_type_to_arrow_data_type(value_glue_data_type)?;
                 Ok(DataType::Map(
-                    Box::new(Field::new(
+                    Arc::new(Field::new(
                         "key_value",
-                        DataType::Struct(vec![
-                            Field::new("key", key_arrow_data_type, true),
-                            Field::new("value", value_arrow_data_type, true),
-                        ]),
+                        DataType::Struct(
+                            vec![
+                                Field::new("key", key_arrow_data_type, true),
+                                Field::new("value", value_arrow_data_type, true),
+                            ]
+                            .into(),
+                        ),
                         true,
                     )),
                     true,
@@ -441,7 +358,7 @@ impl GlueCatalogProvider {
                         Self::map_glue_data_type_to_arrow_data_type(&glue_field.data_type)?;
                     fields.push(Field::new(&glue_field.name, field_arrow_data_type, true));
                 }
-                Ok(DataType::Struct(fields))
+                Ok(DataType::Struct(fields.into()))
             }
         }
     }
@@ -458,11 +375,7 @@ impl GlueCatalogProvider {
     }
 
     fn map_glue_column_to_arrow_field(glue_column: &Column) -> Result<Field> {
-        let name = glue_column
-            .name
-            .as_ref()
-            .ok_or_else(|| GlueError::AWS("Failed to find name in glue column".to_string()))?
-            .clone();
+        let name = glue_column.name();
         let glue_type = glue_column
             .r#type
             .as_ref()
@@ -496,10 +409,7 @@ impl CatalogProvider for GlueCatalogProvider {
     }
 
     fn schema(&self, name: &str) -> Option<Arc<dyn SchemaProvider>> {
-        self.schema_provider_by_database
-            .get(name)
-            .cloned()
-            .map(|x| x as Arc<dyn SchemaProvider>)
+        self.schema_provider_by_database.get(name).cloned()
     }
 
     fn register_schema(
@@ -511,17 +421,47 @@ impl CatalogProvider for GlueCatalogProvider {
     }
 }
 
+#[async_trait]
+impl SchemaProvider for GlueSchemaProvider {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn table_names(&self) -> Vec<String> {
+        self.tables.iter().map(|t| t.name().to_string()).collect()
+    }
+
+    async fn table(&self, name: &str) -> Option<Arc<dyn datafusion::datasource::TableProvider>> {
+        let table = self.tables.iter().find(|t| t.name() == name)?;
+        self.create_table(table)
+            .await
+            .map_err(|err| {
+                log::warn!("{:?}", err);
+                err
+            })
+            .ok()
+    }
+
+    fn table_exist(&self, name: &str) -> bool {
+        self.tables.iter().find(|t| t.name() == name).is_some()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aws_sdk_glue::model::Column;
+    use aws_sdk_glue::types::Column;
     use datafusion::arrow::datatypes::TimeUnit;
 
     #[test]
     fn test_map_tinyint_glue_column_to_arrow_field() -> Result<()> {
         assert_eq!(
-            GlueCatalogProvider::map_glue_column_to_arrow_field(
-                &Column::builder().name("id").r#type("tinyint").build()
+            GlueSchemaProvider::map_glue_column_to_arrow_field(
+                &Column::builder()
+                    .name("id")
+                    .r#type("tinyint")
+                    .build()
+                    .unwrap()
             )
             .unwrap(),
             Field::new("id", DataType::Int8, true)
@@ -532,8 +472,12 @@ mod tests {
     #[test]
     fn test_map_smallint_glue_column_to_arrow_field() -> Result<()> {
         assert_eq!(
-            GlueCatalogProvider::map_glue_column_to_arrow_field(
-                &Column::builder().name("id").r#type("smallint").build()
+            GlueSchemaProvider::map_glue_column_to_arrow_field(
+                &Column::builder()
+                    .name("id")
+                    .r#type("smallint")
+                    .build()
+                    .unwrap()
             )
             .unwrap(),
             Field::new("id", DataType::Int16, true)
@@ -544,8 +488,8 @@ mod tests {
     #[test]
     fn test_map_int_glue_column_to_arrow_field() -> Result<()> {
         assert_eq!(
-            GlueCatalogProvider::map_glue_column_to_arrow_field(
-                &Column::builder().name("id").r#type("int").build()
+            GlueSchemaProvider::map_glue_column_to_arrow_field(
+                &Column::builder().name("id").r#type("int").build().unwrap()
             )
             .unwrap(),
             Field::new("id", DataType::Int32, true)
@@ -556,8 +500,12 @@ mod tests {
     #[test]
     fn test_map_integer_glue_column_to_arrow_field() -> Result<()> {
         assert_eq!(
-            GlueCatalogProvider::map_glue_column_to_arrow_field(
-                &Column::builder().name("id").r#type("integer").build()
+            GlueSchemaProvider::map_glue_column_to_arrow_field(
+                &Column::builder()
+                    .name("id")
+                    .r#type("integer")
+                    .build()
+                    .unwrap()
             )
             .unwrap(),
             Field::new("id", DataType::Int32, true)
@@ -568,8 +516,12 @@ mod tests {
     #[test]
     fn test_map_bigint_glue_column_to_arrow_field() -> Result<()> {
         assert_eq!(
-            GlueCatalogProvider::map_glue_column_to_arrow_field(
-                &Column::builder().name("id").r#type("bigint").build()
+            GlueSchemaProvider::map_glue_column_to_arrow_field(
+                &Column::builder()
+                    .name("id")
+                    .r#type("bigint")
+                    .build()
+                    .unwrap()
             )
             .unwrap(),
             Field::new("id", DataType::Int64, true)
@@ -580,8 +532,12 @@ mod tests {
     #[test]
     fn test_map_float_glue_column_to_arrow_field() -> Result<()> {
         assert_eq!(
-            GlueCatalogProvider::map_glue_column_to_arrow_field(
-                &Column::builder().name("id").r#type("float").build()
+            GlueSchemaProvider::map_glue_column_to_arrow_field(
+                &Column::builder()
+                    .name("id")
+                    .r#type("float")
+                    .build()
+                    .unwrap()
             )
             .unwrap(),
             Field::new("id", DataType::Float32, true)
@@ -592,8 +548,12 @@ mod tests {
     #[test]
     fn test_map_double_glue_column_to_arrow_field() -> Result<()> {
         assert_eq!(
-            GlueCatalogProvider::map_glue_column_to_arrow_field(
-                &Column::builder().name("id").r#type("double").build()
+            GlueSchemaProvider::map_glue_column_to_arrow_field(
+                &Column::builder()
+                    .name("id")
+                    .r#type("double")
+                    .build()
+                    .unwrap()
             )
             .unwrap(),
             Field::new("id", DataType::Float64, true)
@@ -604,8 +564,12 @@ mod tests {
     #[test]
     fn test_map_boolean_glue_column_to_arrow_field() -> Result<()> {
         assert_eq!(
-            GlueCatalogProvider::map_glue_column_to_arrow_field(
-                &Column::builder().name("id").r#type("boolean").build()
+            GlueSchemaProvider::map_glue_column_to_arrow_field(
+                &Column::builder()
+                    .name("id")
+                    .r#type("boolean")
+                    .build()
+                    .unwrap()
             )
             .unwrap(),
             Field::new("id", DataType::Boolean, true)
@@ -616,8 +580,12 @@ mod tests {
     #[test]
     fn test_map_binary_glue_column_to_arrow_field() -> Result<()> {
         assert_eq!(
-            GlueCatalogProvider::map_glue_column_to_arrow_field(
-                &Column::builder().name("id").r#type("binary").build()
+            GlueSchemaProvider::map_glue_column_to_arrow_field(
+                &Column::builder()
+                    .name("id")
+                    .r#type("binary")
+                    .build()
+                    .unwrap()
             )
             .unwrap(),
             Field::new("id", DataType::Binary, true)
@@ -628,8 +596,8 @@ mod tests {
     #[test]
     fn test_map_date_glue_column_to_arrow_field() -> Result<()> {
         assert_eq!(
-            GlueCatalogProvider::map_glue_column_to_arrow_field(
-                &Column::builder().name("id").r#type("date").build()
+            GlueSchemaProvider::map_glue_column_to_arrow_field(
+                &Column::builder().name("id").r#type("date").build().unwrap()
             )
             .unwrap(),
             Field::new("id", DataType::Date32, true)
@@ -640,8 +608,12 @@ mod tests {
     #[test]
     fn test_map_timestamp_glue_column_to_arrow_field() -> Result<()> {
         assert_eq!(
-            GlueCatalogProvider::map_glue_column_to_arrow_field(
-                &Column::builder().name("id").r#type("timestamp").build()
+            GlueSchemaProvider::map_glue_column_to_arrow_field(
+                &Column::builder()
+                    .name("id")
+                    .r#type("timestamp")
+                    .build()
+                    .unwrap()
             )
             .unwrap(),
             Field::new("id", DataType::Timestamp(TimeUnit::Nanosecond, None), true)
@@ -652,8 +624,12 @@ mod tests {
     #[test]
     fn test_map_string_glue_column_to_arrow_field() -> Result<()> {
         assert_eq!(
-            GlueCatalogProvider::map_glue_column_to_arrow_field(
-                &Column::builder().name("id").r#type("string").build()
+            GlueSchemaProvider::map_glue_column_to_arrow_field(
+                &Column::builder()
+                    .name("id")
+                    .r#type("string")
+                    .build()
+                    .unwrap()
             )
             .unwrap(),
             Field::new("id", DataType::Utf8, true)
@@ -664,8 +640,8 @@ mod tests {
     #[test]
     fn test_map_char_glue_column_to_arrow_field() -> Result<()> {
         assert_eq!(
-            GlueCatalogProvider::map_glue_column_to_arrow_field(
-                &Column::builder().name("id").r#type("char").build()
+            GlueSchemaProvider::map_glue_column_to_arrow_field(
+                &Column::builder().name("id").r#type("char").build().unwrap()
             )
             .unwrap(),
             Field::new("id", DataType::Utf8, true)
@@ -676,8 +652,12 @@ mod tests {
     #[test]
     fn test_map_varchar_glue_column_to_arrow_field() -> Result<()> {
         assert_eq!(
-            GlueCatalogProvider::map_glue_column_to_arrow_field(
-                &Column::builder().name("id").r#type("varchar").build()
+            GlueSchemaProvider::map_glue_column_to_arrow_field(
+                &Column::builder()
+                    .name("id")
+                    .r#type("varchar")
+                    .build()
+                    .unwrap()
             )
             .unwrap(),
             Field::new("id", DataType::Utf8, true)
@@ -688,8 +668,12 @@ mod tests {
     #[test]
     fn test_map_decimal_glue_column_to_arrow_field() -> Result<()> {
         assert_eq!(
-            GlueCatalogProvider::map_glue_column_to_arrow_field(
-                &Column::builder().name("id").r#type("decimal(12,9)").build()
+            GlueSchemaProvider::map_glue_column_to_arrow_field(
+                &Column::builder()
+                    .name("id")
+                    .r#type("decimal(12,9)")
+                    .build()
+                    .unwrap()
             )
             .unwrap(),
             Field::new("id", DataType::Decimal256(12, 9), true)
@@ -700,13 +684,17 @@ mod tests {
     #[test]
     fn test_map_array_of_bigint_glue_column_to_arrow_field() -> Result<()> {
         assert_eq!(
-            GlueCatalogProvider::map_glue_column_to_arrow_field(
-                &Column::builder().name("id").r#type("array<bigint>").build()
+            GlueSchemaProvider::map_glue_column_to_arrow_field(
+                &Column::builder()
+                    .name("id")
+                    .r#type("array<bigint>")
+                    .build()
+                    .unwrap()
             )
             .unwrap(),
             Field::new(
                 "id",
-                DataType::List(Box::new(Field::new("item", DataType::Int64, true))),
+                DataType::List(Arc::new(Field::new("item", DataType::Int64, true))),
                 true
             )
         );
@@ -716,13 +704,17 @@ mod tests {
     #[test]
     fn test_map_array_of_int_glue_column_to_arrow_field() -> Result<()> {
         assert_eq!(
-            GlueCatalogProvider::map_glue_column_to_arrow_field(
-                &Column::builder().name("id").r#type("array<int>").build()
+            GlueSchemaProvider::map_glue_column_to_arrow_field(
+                &Column::builder()
+                    .name("id")
+                    .r#type("array<int>")
+                    .build()
+                    .unwrap()
             )
             .unwrap(),
             Field::new(
                 "id",
-                DataType::List(Box::new(Field::new("item", DataType::Int32, true))),
+                DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
                 true
             )
         );
@@ -732,18 +724,19 @@ mod tests {
     #[test]
     fn test_map_array_of_array_of_string_glue_column_to_arrow_field() -> Result<()> {
         assert_eq!(
-            GlueCatalogProvider::map_glue_column_to_arrow_field(
+            GlueSchemaProvider::map_glue_column_to_arrow_field(
                 &Column::builder()
                     .name("id")
                     .r#type("array<array<string>>")
                     .build()
+                    .unwrap()
             )
             .unwrap(),
             Field::new(
                 "id",
-                DataType::List(Box::new(Field::new(
+                DataType::List(Arc::new(Field::new(
                     "item",
-                    DataType::List(Box::new(Field::new("item", DataType::Utf8, true))),
+                    DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
                     true
                 ),)),
                 true
@@ -755,19 +748,23 @@ mod tests {
     #[test]
     fn test_map_struct_of_int_and_int_glue_column_to_arrow_field() -> Result<()> {
         assert_eq!(
-            GlueCatalogProvider::map_glue_column_to_arrow_field(
+            GlueSchemaProvider::map_glue_column_to_arrow_field(
                 &Column::builder()
                     .name("id")
                     .r#type("struct<reply_id:int,next_id:int>")
                     .build()
+                    .unwrap()
             )
             .unwrap(),
             Field::new(
                 "id",
-                DataType::Struct(vec![
-                    Field::new("reply_id", DataType::Int32, true),
-                    Field::new("next_id", DataType::Int32, true),
-                ]),
+                DataType::Struct(
+                    vec![
+                        Field::new("reply_id", DataType::Int32, true),
+                        Field::new("next_id", DataType::Int32, true),
+                    ]
+                    .into()
+                ),
                 true
             )
         );
@@ -780,20 +777,26 @@ mod tests {
     #[test]
     fn test_map_struct_of_struct_of_int_glue_column_to_arrow_field() -> Result<()> {
         assert_eq!(
-            GlueCatalogProvider::map_glue_column_to_arrow_field(
+            GlueSchemaProvider::map_glue_column_to_arrow_field(
                 &Column::builder()
                     .name("id")
                     .r#type("struct<reply:struct<reply_id:int>>")
                     .build()
+                    .unwrap()
             )
             .unwrap(),
             Field::new(
                 "id",
-                DataType::Struct(vec![Field::new(
-                    "reply",
-                    DataType::Struct(vec![Field::new("reply_id", DataType::Int32, true),]),
-                    true
-                ),]),
+                DataType::Struct(
+                    vec![Field::new(
+                        "reply",
+                        DataType::Struct(
+                            vec![Field::new("reply_id", DataType::Int32, true),].into()
+                        ),
+                        true
+                    ),]
+                    .into()
+                ),
                 true
             )
         );
@@ -803,22 +806,26 @@ mod tests {
     #[test]
     fn test_map_map_of_string_and_boolean_glue_column_to_arrow_field() -> Result<()> {
         assert_eq!(
-            GlueCatalogProvider::map_glue_column_to_arrow_field(
+            GlueSchemaProvider::map_glue_column_to_arrow_field(
                 &Column::builder()
                     .name("id")
                     .r#type("map<string,boolean>")
                     .build()
+                    .unwrap()
             )
             .unwrap(),
             Field::new(
                 "id",
                 DataType::Map(
-                    Box::new(Field::new(
+                    Arc::new(Field::new(
                         "key_value",
-                        DataType::Struct(vec![
-                            Field::new("key", DataType::Utf8, true),
-                            Field::new("value", DataType::Boolean, true),
-                        ]),
+                        DataType::Struct(
+                            vec![
+                                Field::new("key", DataType::Utf8, true),
+                                Field::new("value", DataType::Boolean, true),
+                            ]
+                            .into()
+                        ),
                         true
                     ),),
                     true
@@ -833,36 +840,43 @@ mod tests {
     fn test_map_map_of_string_and_map_of_string_and_boolean_glue_column_to_arrow_field(
     ) -> Result<()> {
         assert_eq!(
-            GlueCatalogProvider::map_glue_column_to_arrow_field(
+            GlueSchemaProvider::map_glue_column_to_arrow_field(
                 &Column::builder()
                     .name("id")
                     .r#type("map<string,map<string,boolean>>")
                     .build()
+                    .unwrap()
             )
             .unwrap(),
             Field::new(
                 "id",
                 DataType::Map(
-                    Box::new(Field::new(
+                    Arc::new(Field::new(
                         "key_value",
-                        DataType::Struct(vec![
-                            Field::new("key", DataType::Utf8, true),
-                            Field::new(
-                                "value",
-                                DataType::Map(
-                                    Box::new(Field::new(
-                                        "key_value",
-                                        DataType::Struct(vec![
-                                            Field::new("key", DataType::Utf8, true),
-                                            Field::new("value", DataType::Boolean, true),
-                                        ]),
+                        DataType::Struct(
+                            vec![
+                                Field::new("key", DataType::Utf8, true),
+                                Field::new(
+                                    "value",
+                                    DataType::Map(
+                                        Arc::new(Field::new(
+                                            "key_value",
+                                            DataType::Struct(
+                                                vec![
+                                                    Field::new("key", DataType::Utf8, true),
+                                                    Field::new("value", DataType::Boolean, true),
+                                                ]
+                                                .into()
+                                            ),
+                                            true
+                                        ),),
                                         true
-                                    ),),
+                                    ),
                                     true
                                 ),
-                                true
-                            ),
-                        ]),
+                            ]
+                            .into()
+                        ),
                         true
                     ),),
                     true
@@ -878,57 +892,60 @@ mod tests {
     fn test_map_glue_data_type() -> Result<()> {
         // simple types
         assert_eq!(
-            GlueCatalogProvider::map_glue_data_type("int").unwrap(),
+            GlueSchemaProvider::map_glue_data_type("int").unwrap(),
             DataType::Int32
         );
         assert_eq!(
-            GlueCatalogProvider::map_glue_data_type("boolean").unwrap(),
+            GlueSchemaProvider::map_glue_data_type("boolean").unwrap(),
             DataType::Boolean
         );
         assert_eq!(
-            GlueCatalogProvider::map_glue_data_type("bigint").unwrap(),
+            GlueSchemaProvider::map_glue_data_type("bigint").unwrap(),
             DataType::Int64
         );
         assert_eq!(
-            GlueCatalogProvider::map_glue_data_type("float").unwrap(),
+            GlueSchemaProvider::map_glue_data_type("float").unwrap(),
             DataType::Float32
         );
         assert_eq!(
-            GlueCatalogProvider::map_glue_data_type("double").unwrap(),
+            GlueSchemaProvider::map_glue_data_type("double").unwrap(),
             DataType::Float64
         );
         assert_eq!(
-            GlueCatalogProvider::map_glue_data_type("binary").unwrap(),
+            GlueSchemaProvider::map_glue_data_type("binary").unwrap(),
             DataType::Binary
         );
         assert_eq!(
-            GlueCatalogProvider::map_glue_data_type("timestamp").unwrap(),
+            GlueSchemaProvider::map_glue_data_type("timestamp").unwrap(),
             DataType::Timestamp(TimeUnit::Nanosecond, None)
         );
         assert_eq!(
-            GlueCatalogProvider::map_glue_data_type("string").unwrap(),
+            GlueSchemaProvider::map_glue_data_type("string").unwrap(),
             DataType::Utf8
         );
 
-        let list_of_string = DataType::List(Box::new(Field::new("item", DataType::Utf8, true)));
+        let list_of_string = DataType::List(Arc::new(Field::new("item", DataType::Utf8, true)));
 
         // array type
         assert_eq!(
-            GlueCatalogProvider::map_glue_data_type("array<string>").unwrap(),
+            GlueSchemaProvider::map_glue_data_type("array<string>").unwrap(),
             list_of_string
         );
         assert_eq!(
-            GlueCatalogProvider::map_glue_data_type("array<array<string>>").unwrap(),
-            DataType::List(Box::new(Field::new("item", list_of_string.clone(), true)))
+            GlueSchemaProvider::map_glue_data_type("array<array<string>>").unwrap(),
+            DataType::List(Arc::new(Field::new("item", list_of_string.clone(), true)))
         );
 
         let map_of_string_and_boolean = DataType::Map(
-            Box::new(Field::new(
+            Arc::new(Field::new(
                 "key_value",
-                DataType::Struct(vec![
-                    Field::new("key", DataType::Utf8, true),
-                    Field::new("value", DataType::Boolean, true),
-                ]),
+                DataType::Struct(
+                    vec![
+                        Field::new("key", DataType::Utf8, true),
+                        Field::new("value", DataType::Boolean, true),
+                    ]
+                    .into(),
+                ),
                 true,
             )),
             true,
@@ -936,39 +953,43 @@ mod tests {
 
         // map type
         assert_eq!(
-            GlueCatalogProvider::map_glue_data_type("map<string,boolean>").unwrap(),
+            GlueSchemaProvider::map_glue_data_type("map<string,boolean>").unwrap(),
             map_of_string_and_boolean
         );
         assert_eq!(
-            GlueCatalogProvider::map_glue_data_type("map<map<string,boolean>,array<string>>")
+            GlueSchemaProvider::map_glue_data_type("map<map<string,boolean>,array<string>>")
                 .unwrap(),
             DataType::Map(
-                Box::new(Field::new(
+                Arc::new(Field::new(
                     "key_value",
-                    DataType::Struct(vec![
-                        Field::new("key", map_of_string_and_boolean, true),
-                        Field::new("value", list_of_string, true),
-                    ]),
+                    DataType::Struct(
+                        vec![
+                            Field::new("key", map_of_string_and_boolean, true),
+                            Field::new("value", list_of_string, true),
+                        ]
+                        .into()
+                    ),
                     true
                 )),
                 true
             )
         );
 
-        let struct_of_int = DataType::Struct(vec![Field::new("reply_id", DataType::Int32, true)]);
+        let struct_of_int =
+            DataType::Struct(vec![Field::new("reply_id", DataType::Int32, true)].into());
 
         // struct type
         assert_eq!(
-            GlueCatalogProvider::map_glue_data_type("struct<reply_id:int>").unwrap(),
+            GlueSchemaProvider::map_glue_data_type("struct<reply_id:int>").unwrap(),
             struct_of_int
         );
         assert_eq!(
-            GlueCatalogProvider::map_glue_data_type("struct<reply:struct<reply_id:int>>").unwrap(),
-            DataType::Struct(vec![Field::new("reply", struct_of_int, true)])
+            GlueSchemaProvider::map_glue_data_type("struct<reply:struct<reply_id:int>>").unwrap(),
+            DataType::Struct(vec![Field::new("reply", struct_of_int, true)].into())
         );
 
         assert_eq!(
-            GlueCatalogProvider::map_glue_data_type("decimal(12,9)").unwrap(),
+            GlueSchemaProvider::map_glue_data_type("decimal(12,9)").unwrap(),
             DataType::Decimal256(12, 9)
         );
 
