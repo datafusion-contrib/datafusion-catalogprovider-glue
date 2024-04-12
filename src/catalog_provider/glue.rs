@@ -10,6 +10,7 @@ use aws_types::SdkConfig;
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use datafusion::catalog::schema::SchemaProvider;
 use datafusion::catalog::CatalogProvider;
+use datafusion::common::GetExt;
 use datafusion::datasource::file_format::avro::AvroFormat;
 use datafusion::datasource::file_format::csv::CsvFormat;
 use datafusion::datasource::file_format::json::JsonFormat;
@@ -292,7 +293,9 @@ impl GlueSchemaProvider {
         let format = format_result?;
 
         let listing_options = ListingOptions {
-            file_extension: "".to_string(),
+            // empty extension doesn't work, as it fails on empty files, like spark _SUCCESS flags
+            // TODO: find a way how to support compressed files, like *.csv.gz
+            file_extension: format.file_type().get_ext(),
             format: Arc::from(format),
             table_partition_cols: vec![],
             collect_stat: true,
