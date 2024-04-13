@@ -20,6 +20,8 @@ pub enum GlueError {
     GlueDataTypeMapping(String),
     /// Wrapper for DeltaLake errors
     DeltaLake(String),
+    /// Wrapper for url parse errors
+    UrlParseError(String),
 }
 
 impl Display for GlueError {
@@ -32,6 +34,7 @@ impl Display for GlueError {
                 write!(f, "Could not map glue data type: {}", desc)
             }
             GlueError::DeltaLake(desc) => write!(f, "DeltaLake error: {}", desc),
+            GlueError::UrlParseError(desc) => write!(f, "ParseError: {}", desc),
         }
     }
 }
@@ -53,6 +56,12 @@ impl From<DataFusionError> for GlueError {
 impl<T: Error + 'static + Send + Sync> From<SdkError<T>> for GlueError {
     fn from(sdk_error: SdkError<T>) -> Self {
         GlueError::AWS(sdk_error.to_string())
+    }
+}
+
+impl From<url::ParseError> for GlueError {
+    fn from(value: url::ParseError) -> Self {
+        GlueError::UrlParseError(value.to_string())
     }
 }
 

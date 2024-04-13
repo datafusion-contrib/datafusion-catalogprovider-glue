@@ -21,7 +21,7 @@ aws-config = "1"
 aws-sdk-glue = "1"
 aws-types = "1"
 datafusion = { version = "37", features = ["avro"] }
-deltalake = {version = "0.17", optional=true, features=["datafusion", "deltalake-aws", "s3"]}
+deltalake = {version = "0.17.1", optional=true, features=["datafusion", "deltalake-aws", "s3"]}
 object_store = { version = "0.9.0", features = ["aws"] }
 pest = "2.3"
 pest_derive = "2.3"
@@ -35,7 +35,10 @@ async-trait = "0"
 env_logger = "0"
 
 [features]
-default = []
+default = ["deltalake"]
 deltalake = [
     "dep:deltalake"
 ]
+
+[patch.crates-io]
+deltalake = {path = "../delta-rs/crates/deltalake"}

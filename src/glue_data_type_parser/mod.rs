@@ -3,7 +3,6 @@
 //! This modules contains a Parser for Glue Data Types.
 use crate::error::GlueError;
 use crate::error::Result;
-use crate::glue_data_type_parser;
 
 /// Possible Glue data types
 /// Known sources:

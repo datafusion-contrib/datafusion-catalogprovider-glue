@@ -125,22 +125,21 @@ impl GlueCatalogProvider {
 }
 
 impl GlueSchemaProvider {
-
-    fn is_supported(glue_table: &Table) -> bool {
-        let provider = Self::get_provider(glue_table);
-        if let Some("delta") = provider {
+    fn is_supported(&self, glue_table: &Table) -> bool {
+        let table_type = Self::get_table_type(glue_table);
+        if let Some("delta") = table_type {
             #[cfg(not(feature = "deltalake"))]
             return false;
             #[cfg(feature = "deltalake")]
-            return true
+            return crate::catalog_provider::delta_table::is_supported(&self.object_store_registry, glue_table);
         }
-        return GlueTable::is_supported(glue_table)
+        return GlueTable::is_supported(glue_table);
     }
 
-    fn get_provider<'a>(glue_table: &'a Table) -> Option<&'a str> {
+    fn get_table_type<'a>(glue_table: &'a Table) -> Option<&'a str> {
         glue_table
             .parameters()
-            .and_then(|f| f.get("spark.sql.sources.provider"))
+            .and_then(|f| f.get("table_type").or(f.get("spark.sql.sources.provider")))
             .map(|s| s.as_str())
     }
 
@@ -154,11 +153,11 @@ impl GlueSchemaProvider {
 
         if let Some("delta") = provider {
             #[cfg(feature = "deltalake")]
-            return crate::catalog_provider::delta_table::create_delta_table(
+            return Ok(crate::catalog_provider::delta_table::create_delta_table(
                 glue_table,
                 &self.object_store_registry,
             )
-            .await;
+            .await?);
             #[cfg(not(feature = "deltalake"))]
             Err(GlueError::DeltaLake(
                 "DeltaLake support is not enabled".to_string(),
@@ -201,7 +200,11 @@ impl SchemaProvider for GlueSchemaProvider {
     }
 
     fn table_names(&self) -> Vec<String> {
-        self.tables.iter().filter(|t| GlueSchemaProvider::is_supported(t)).map(|t| t.name().to_string()).collect()
+        self.tables
+            .iter()
+            .filter(|t| self.is_supported(t))
+            .map(|t| t.name().to_string())
+            .collect()
     }
 
     async fn table(

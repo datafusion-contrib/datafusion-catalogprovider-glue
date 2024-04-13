@@ -63,7 +63,7 @@ impl GlueTable {
         let mut listing_options = Self::get_listing_options(database_name, table_name, &sd)?;
         let partitions = table.partition_keys();
         let schema = Self::derive_schema(&table)?;
-        let fields = schema.fields().iter().as_slice();
+        let fields = schema.fields();
         let part_cols = fields[(fields.len() - partitions.len())..]
             .iter()
             .map(|f| (f.name().to_string(), f.data_type().clone()))
