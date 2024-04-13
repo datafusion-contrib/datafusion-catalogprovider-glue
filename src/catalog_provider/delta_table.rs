@@ -25,8 +25,7 @@ fn get_object_store(
 
     let url = url::Url::parse(location)?;
 
-    let object_store = registry
-        .get_store(&url)?;
+    let object_store = registry.get_store(&url)?;
     Ok(object_store)
 }
 
@@ -46,7 +45,7 @@ pub(crate) async fn create_delta_table(
 ) -> Result<Arc<dyn TableProvider>> {
     let location = table_location(table)?;
     let url = url::Url::parse(&location)?;
-        let mut builder = DeltaTableBuilder::from_uri(&location);
+    let mut builder = DeltaTableBuilder::from_uri(&location);
 
     if let Ok(object_store) = get_object_store(object_store_registry, &location) {
         builder = builder.with_storage_backend(object_store, url);

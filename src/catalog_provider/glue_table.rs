@@ -1,7 +1,7 @@
-use std::collections::{HashMap, HashSet};
-use std::{any::Any, sync::Arc};
 use crate::error;
 use crate::glue_data_type_parser::*;
+use std::collections::{HashMap, HashSet};
+use std::{any::Any, sync::Arc};
 
 use datafusion::common::GetExt;
 use futures::{
@@ -12,19 +12,19 @@ use futures::{
 use object_store::{ObjectMeta, ObjectStore};
 
 use async_trait::async_trait;
-use aws_sdk_glue::{types::Table, Client};
 use aws_sdk_glue::types::{Column, StorageDescriptor};
+use aws_sdk_glue::{types::Table, Client};
 
 use datafusion::{
     arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit},
     common::{DataFusionError, ToDFSchema},
     datasource::{
-        listing::{ListingOptions, ListingTableUrl, PartitionedFile},
-        physical_plan::FileScanConfig,
-        TableProvider,
         file_format::{
             avro::AvroFormat, csv::CsvFormat, json::JsonFormat, parquet::ParquetFormat, FileFormat,
         },
+        listing::{ListingOptions, ListingTableUrl, PartitionedFile},
+        physical_plan::FileScanConfig,
+        TableProvider,
     },
     error::Result,
     execution::context::SessionState,
@@ -71,10 +71,14 @@ impl GlueTable {
 
         listing_options = listing_options.with_table_partition_cols(part_cols);
 
-
-        Ok(Self { table, client, schema: Arc::new(schema), listing_options })
+        Ok(Self {
+            table,
+            client,
+            schema: Arc::new(schema),
+            listing_options,
+        })
     }
-    
+
     fn get_glue_expr(&self, filters: &[Expr]) -> Option<String> {
         let mut glue_expr: Vec<String> = vec![];
 
@@ -162,7 +166,9 @@ impl GlueTable {
 
     fn get_storage_location(sd: &StorageDescriptor) -> error::Result<&str> {
         sd.location.as_deref().ok_or_else(|| {
-            error::GlueError::AWS("Failed to find uri in storage descriptor for glue table".to_string())
+            error::GlueError::AWS(
+                "Failed to find uri in storage descriptor for glue table".to_string(),
+            )
         })
     }
 
@@ -173,10 +179,9 @@ impl GlueTable {
     }
 
     fn get_database_name(glue_table: &Table) -> error::Result<&str> {
-        glue_table
-            .database_name
-            .as_deref()
-            .ok_or_else(|| error::GlueError::AWS("Failed to find name for glue database".to_string()))
+        glue_table.database_name.as_deref().ok_or_else(|| {
+            error::GlueError::AWS("Failed to find name for glue database".to_string())
+        })
     }
 
     fn wrap_error_with_table_info(
@@ -185,9 +190,10 @@ impl GlueTable {
         e: error::GlueError,
     ) -> error::GlueError {
         match e {
-            error::GlueError::NotImplemented(msg) => {
-                error::GlueError::NotImplemented(format!("{}.{}: {}", database_name, table_name, msg))
-            }
+            error::GlueError::NotImplemented(msg) => error::GlueError::NotImplemented(format!(
+                "{}.{}: {}",
+                database_name, table_name, msg
+            )),
             _ => e,
         }
     }
@@ -198,9 +204,8 @@ impl GlueTable {
             Ok(sd) => {
                 Self::calculate_options(sd).is_ok() && Self::derive_schema(glue_table).is_ok()
             }
-            _ => false
+            _ => false,
         }
-        
     }
 
     fn calculate_options(sd: &StorageDescriptor) -> error::Result<ListingOptions> {
@@ -302,7 +307,9 @@ impl GlueTable {
         Ok(listing_options)
     }
 
-    fn map_glue_data_type_to_arrow_data_type(glue_data_type: &GlueDataType) -> error::Result<DataType> {
+    fn map_glue_data_type_to_arrow_data_type(
+        glue_data_type: &GlueDataType,
+    ) -> error::Result<DataType> {
         match glue_data_type {
             GlueDataType::TinyInt => Ok(DataType::Int8),
             GlueDataType::SmallInt => Ok(DataType::Int16),
@@ -395,8 +402,6 @@ impl GlueTable {
         }
         Ok(Schema::new(arrow_fields))
     }
-
-
 }
 
 async fn list_all_files<'a>(
@@ -414,7 +419,7 @@ async fn list_all_files<'a>(
     };
 
     // If the prefix is a file, use a head request, otherwise list
-    // let list = 
+    // let list =
     Ok(list
         .try_filter(move |meta| {
             let path = &meta.location;
@@ -440,10 +445,10 @@ async fn partition_file_list<'a>(
                 let mut x: PartitionedFile = object_meta.into();
                 if let Some(part) = part {
                     x.partition_values = part
-                    .values()
-                    .iter()
-                    .map(|v| ScalarValue::new_utf8(v))
-                    .collect();
+                        .values()
+                        .iter()
+                        .map(|v| ScalarValue::new_utf8(v))
+                        .collect();
                 }
                 x
             }),
@@ -479,7 +484,9 @@ impl TableProvider for GlueTable {
         let table_url = Self::get_storage_location(sd)?;
         let listing_table_url = ListingTableUrl::parse(table_url)?;
         let object_store_url = listing_table_url.object_store();
-        let store = state.runtime_env().object_store(listing_table_url.clone())?;
+        let store = state
+            .runtime_env()
+            .object_store(listing_table_url.clone())?;
         let mut partitions = vec![];
 
         let part_keys = self.table.partition_keys();
@@ -501,17 +508,17 @@ impl TableProvider for GlueTable {
                 };
             }
             partitions
-            .iter()
-            .flat_map(|p| {
-                p.storage_descriptor().and_then(|sd| {
-                    sd.location().and_then(|loc| {
-                        ListingTableUrl::parse(with_trailing_slash(loc))
-                            .ok()
-                            .map(|x| (Some(p), x))
+                .iter()
+                .flat_map(|p| {
+                    p.storage_descriptor().and_then(|sd| {
+                        sd.location().and_then(|loc| {
+                            ListingTableUrl::parse(with_trailing_slash(loc))
+                                .ok()
+                                .map(|x| (Some(p), x))
+                        })
                     })
                 })
-            })
-            .collect::<Vec<_>>()
+                .collect::<Vec<_>>()
         } else {
             vec![(None, listing_table_url)]
         };
@@ -539,8 +546,6 @@ impl TableProvider for GlueTable {
         }
 
         let partitioned_file_lists = vec![partitioned_files];
-
-
 
         // println!("partitioned_file_lists: {:?}", partitioned_file_lists);
 
@@ -1109,8 +1114,7 @@ mod tests {
             map_of_string_and_boolean
         );
         assert_eq!(
-            GlueTable::map_glue_data_type("map<map<string,boolean>,array<string>>")
-                .unwrap(),
+            GlueTable::map_glue_data_type("map<map<string,boolean>,array<string>>").unwrap(),
             DataType::Map(
                 Arc::new(Field::new(
                     "key_value",
