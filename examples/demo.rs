@@ -15,18 +15,19 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use aws_types::credentials::ProvideCredentials;
-use aws_types::{Credentials, SdkConfig};
+use aws_sdk_glue::config::{Credentials, ProvideCredentials};
+use aws_types::SdkConfig;
 use datafusion::arrow::array::StringArray;
 use datafusion::common::{DataFusionError, Result};
-use datafusion::datasource::object_store::{ObjectStoreProvider, ObjectStoreRegistry};
+use datafusion::datasource::object_store::ObjectStoreRegistry;
 use datafusion::execution::runtime_env::{RuntimeConfig, RuntimeEnv};
 use datafusion::prelude::*;
 use datafusion_catalogprovider_glue::catalog_provider::glue::{
     GlueCatalogProvider, TableRegistrationOptions,
 };
 use object_store::aws::AmazonS3Builder;
-use object_store::ObjectStore;
+use object_store::{ClientOptions, ObjectStore};
+use std::collections::HashMap;
 use std::sync::Arc;
 use url::Url;
 
@@ -37,20 +38,22 @@ async fn main() -> Result<()> {
 
     // Register an object store provider which creates instances for each requested s3://bucket using the sdk_config credentials
     // As an alternative you can also manually register the required object_store(s)
-    let object_store_provider = Arc::new(DemoS3ObjectStoreProvider::new(&sdk_config).await?);
-    let object_store_registry = Arc::new(ObjectStoreRegistry::new_with_provider(Some(
-        object_store_provider,
-    )));
-    let runtime_config = RuntimeConfig::default().with_object_store_registry(object_store_registry);
+    let object_store_provider = DemoS3ObjectStoreProvider::new(&sdk_config).await?;
+
+    let runtime_config = RuntimeConfig::default().with_object_store_registry(Arc::new(object_store_provider));
     let config = SessionConfig::new().with_information_schema(true);
     let runtime = Arc::new(RuntimeEnv::new(runtime_config)?);
-    let ctx = SessionContext::with_config_rt(config, runtime);
+    let ctx = SessionContext::new_with_config_rt(config, runtime);
 
     let mut glue_catalog_provider = GlueCatalogProvider::new(&sdk_config);
 
     let register_results = glue_catalog_provider
-        .register_all_with_options(&TableRegistrationOptions::InferSchemaFromData, &ctx.state())
+        .register_all_with_options(
+            &TableRegistrationOptions::DeriveSchemaFromGlueTable,
+            &ctx.state(),
+        )
         .await?;
+
     for result in register_results {
         if result.is_err() {
             // only output tables which were not registered...
@@ -117,9 +120,11 @@ async fn sample(ctx: SessionContext, schema: &str, table: &str, limit: usize) ->
     Ok(())
 }
 
+#[derive(Debug)]
 pub struct DemoS3ObjectStoreProvider {
     credentials: Credentials,
     region: String,
+    object_stores: tokio::sync::RwLock<HashMap<Url, Arc<dyn ObjectStore>>>,
 }
 
 impl DemoS3ObjectStoreProvider {
@@ -135,14 +140,20 @@ impl DemoS3ObjectStoreProvider {
             .region()
             .map(|r| r.to_string())
             .unwrap_or_else(|| "eu-central-1".to_string());
+        let object_stores: tokio::sync::RwLock<HashMap<Url, Arc<dyn ObjectStore>>> =
+            tokio::sync::RwLock::new(HashMap::new());
 
         Ok(DemoS3ObjectStoreProvider {
             credentials,
             region,
+            object_stores,
         })
     }
 
     fn build_s3_object_store(&self, url: &Url) -> crate::Result<Arc<dyn ObjectStore>> {
+        if url.scheme() == "file" {
+            return Ok(Arc::new(object_store::local::LocalFileSystem::default()));
+        }
         let bucket_name = get_host_name(url)?;
 
         let s3_builder = AmazonS3Builder::new()
@@ -152,7 +163,9 @@ impl DemoS3ObjectStoreProvider {
             .with_secret_access_key(self.credentials.secret_access_key());
 
         let s3 = match self.credentials.session_token() {
-            Some(session_token) => s3_builder.with_token(session_token),
+            Some(session_token) => s3_builder
+                .with_token(session_token)
+                .with_client_options(ClientOptions::default().with_timeout_disabled()),
             None => s3_builder,
         }
         .build()?;
@@ -161,18 +174,26 @@ impl DemoS3ObjectStoreProvider {
     }
 }
 
-fn get_host_name(url: &Url) -> Result<&str> {
-    url.host_str().ok_or_else(|| {
-        DataFusionError::Execution(format!(
-            "Not able to parse hostname from url, {}",
-            url.as_str()
-        ))
-    })
+impl ObjectStoreRegistry for DemoS3ObjectStoreProvider {
+    fn register_store(
+        &self,
+        url: &Url,
+        store: Arc<dyn ObjectStore>,
+    ) -> Option<Arc<dyn ObjectStore>> {
+        {
+            let mut guard = self.object_stores.blocking_write();
+            guard.insert(url.clone(), store.clone());
+        }
+        Some(store.clone())
+    }
+
+    fn get_store(&self, url: &Url) -> Result<Arc<dyn ObjectStore>> {
+        self.build_s3_object_store(url)
+    }
 }
 
-/// ObjectStoreProvider for S3
-impl ObjectStoreProvider for DemoS3ObjectStoreProvider {
-    fn get_by_url(&self, url: &Url) -> Option<Arc<dyn ObjectStore>> {
-        self.build_s3_object_store(url).ok()
-    }
+fn get_host_name(url: &Url) -> Result<&str> {
+    url.host_str().ok_or_else(|| {
+        DataFusionError::Execution(format!("Not able to parse hostname from url, {}", url))
+    })
 }
