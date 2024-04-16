@@ -1205,6 +1205,8 @@ dependencies = [
 name = "datafusion-catalogprovider-glue"
 version = "0.4.0"
 dependencies = [
+ "arrow",
+ "arrow-json",
  "async-trait",
  "aws-config",
  "aws-sdk-glue",
@@ -1217,6 +1219,8 @@ dependencies = [
  "object_store",
  "pest",
  "pest_derive",
+ "serde",
+ "serde_json",
  "tokio",
  "url",
 ]

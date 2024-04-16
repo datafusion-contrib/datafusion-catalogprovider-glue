@@ -1,8 +1,13 @@
 use crate::error;
 use crate::glue_data_type_parser::*;
 use std::collections::{HashMap, HashSet};
+use std::str::FromStr;
 use std::{any::Any, sync::Arc};
 
+use serde_json;
+
+use datafusion::common::parsers::CompressionTypeVariant;
+use datafusion::common::FileType;
 use datafusion::common::GetExt;
 use futures::{
     future,
@@ -20,7 +25,8 @@ use datafusion::{
     common::{DataFusionError, ToDFSchema},
     datasource::{
         file_format::{
-            avro::AvroFormat, csv::CsvFormat, json::JsonFormat, parquet::ParquetFormat, FileFormat,
+            arrow::ArrowFormat, avro::AvroFormat, csv::CsvFormat, json::JsonFormat,
+            parquet::ParquetFormat, FileFormat,
         },
         listing::{ListingOptions, ListingTableUrl, PartitionedFile},
         physical_plan::FileScanConfig,
@@ -34,6 +40,7 @@ use datafusion::{
     physical_plan::{ExecutionPlan, Statistics},
     scalar::ScalarValue,
 };
+use serde::Deserialize;
 
 /// GlueTable
 pub struct GlueTable {
@@ -43,8 +50,18 @@ pub struct GlueTable {
     pub client: Client,
     /// table schema (including partitioning columns)
     pub schema: SchemaRef,
-    /// listing options
-    pub listing_options: ListingOptions,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct SparkSchemaField {
+    name: String,
+    r#type: String,
+    nullable: bool,
+}
+#[derive(Deserialize, Debug)]
+pub struct SparkSchema {
+    r#type: String,
+    fields: Vec<SparkSchemaField>,
 }
 
 fn scalar_to_string(scalar: &ScalarValue) -> String {
@@ -54,28 +71,25 @@ fn scalar_to_string(scalar: &ScalarValue) -> String {
     }
 }
 
+fn file_exts(file_type: &FileType) -> Vec<String> {
+    match file_type {
+        FileType::CSV | FileType::JSON => ["gz", "bz2"]
+            .iter()
+            .map(|cext| format!("{}.{}", file_type.get_ext(), cext))
+            .collect::<Vec<String>>(),
+        _ => vec![file_type.get_ext()],
+    }
+}
+
 impl GlueTable {
     /// constructor
     pub fn new(table: Table, client: Client) -> error::Result<Self> {
-        let sd = Self::get_storage_descriptor(&table)?;
-        let database_name = Self::get_database_name(&table)?;
-        let table_name = table.name();
-        let mut listing_options = Self::get_listing_options(database_name, table_name, &sd)?;
-        let partitions = table.partition_keys();
+        log::info!("table: {:#?}", table);
         let schema = Self::derive_schema(&table)?;
-        let fields = schema.fields();
-        let part_cols = fields[(fields.len() - partitions.len())..]
-            .iter()
-            .map(|f| (f.name().to_string(), f.data_type().clone()))
-            .collect::<Vec<_>>();
-
-        listing_options = listing_options.with_table_partition_cols(part_cols);
-
         Ok(Self {
             table,
             client,
             schema: Arc::new(schema),
-            listing_options,
         })
     }
 
@@ -139,8 +153,10 @@ impl GlueTable {
         database_name: &str,
         table_name: &str,
         sd: &StorageDescriptor,
+        file_type: &FileType,
+        compression: CompressionTypeVariant,
     ) -> error::Result<ListingOptions> {
-        Self::calculate_options(sd)
+        Self::calculate_options(sd, file_type, compression)
             .map_err(|e| Self::wrap_error_with_table_info(database_name, table_name, e))
     }
 
@@ -148,10 +164,32 @@ impl GlueTable {
         let database_name = Self::get_database_name(table)?;
         let table_name = table.name();
         let sd = Self::get_storage_descriptor(table)?;
-        let mut columns = Self::get_columns(&sd)?.clone();
-        if let Some(part_keys) = &table.partition_keys {
-            columns.extend(part_keys.iter().cloned());
-        }
+
+        let spark_schema = table
+            .parameters()
+            .and_then(|p| p.get("spark.sql.sources.schema"))
+            .and_then(|schema_str| serde_json::from_str::<SparkSchema>(schema_str).ok());
+        log::info!("spark schema: {:?}", spark_schema);
+
+        let columns = if let Some(spark_schema) = &spark_schema {
+            spark_schema
+                .fields
+                .iter()
+                .map(|f| {
+                    Column::builder()
+                        .name(&f.name)
+                        .r#type(&f.r#type)
+                        .build()
+                        .unwrap()
+                })
+                .collect()
+        } else {
+            let mut columns = Self::get_columns(&sd)?.clone();
+            if let Some(part_keys) = &table.partition_keys {
+                columns.extend(part_keys.iter().cloned());
+            }
+            columns
+        };
         Self::map_glue_columns_to_arrow_schema(&columns)
             .map_err(|e| Self::wrap_error_with_table_info(database_name, table_name, e))
     }
@@ -164,8 +202,12 @@ impl GlueTable {
         })
     }
 
-    fn get_storage_location(sd: &StorageDescriptor) -> error::Result<&str> {
-        sd.location.as_deref().ok_or_else(|| {
+    fn get_table_location(sd: &StorageDescriptor) -> error::Result<&str> {
+        let serde_info_path = sd.serde_info().and_then(|si| {
+            si.parameters()
+                .and_then(|x| x.get("path").map(|f| f.as_str()))
+        });
+        serde_info_path.or_else(|| sd.location()).ok_or_else(|| {
             error::GlueError::AWS(
                 "Failed to find uri in storage descriptor for glue table".to_string(),
             )
@@ -201,14 +243,12 @@ impl GlueTable {
     pub fn is_supported(glue_table: &Table) -> bool {
         let sd = Self::get_storage_descriptor(glue_table);
         match sd {
-            Ok(sd) => {
-                Self::calculate_options(sd).is_ok() && Self::derive_schema(glue_table).is_ok()
-            }
+            Ok(sd) => Self::get_file_type(sd).is_ok() && Self::derive_schema(glue_table).is_ok(),
             _ => false,
         }
     }
 
-    fn calculate_options(sd: &StorageDescriptor) -> error::Result<ListingOptions> {
+    fn get_file_type(sd: &StorageDescriptor) -> error::Result<FileType> {
         let empty_str = String::from("");
         let input_format = sd.input_format.as_ref().unwrap_or(&empty_str);
         let output_format = sd.output_format.as_ref().unwrap_or(&empty_str);
@@ -221,90 +261,113 @@ impl GlueTable {
             .serialization_library
             .as_ref()
             .unwrap_or(&empty_str);
-        let serde_info_parameters = serde_info
-            .parameters
-            .as_ref()
-            .ok_or_else(|| {
-                error::GlueError::AWS(
-                    "Failed to find parameters of serde_info in storage descriptor for glue table"
-                        .to_string(),
-                )
-            })?
-            .clone();
+
+        let item: (&str, &str, &str) = (input_format, output_format, serialization_library);
+        match item {
+            (
+                "org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat",
+                "org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat",
+                "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe",
+            ) => Ok(FileType::PARQUET),
+            (
+                "org.apache.hadoop.mapred.SequenceFileInputFormat",
+                "org.apache.hadoop.hive.ql.io.HiveSequenceFileOutputFormat",
+                "org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe",
+            ) => Ok(FileType::CSV),
+            (
+                "org.apache.hadoop.mapred.TextInputFormat",
+                "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat",
+                "org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe",
+            ) => Ok(FileType::CSV),
+            (
+                "org.apache.hadoop.hive.ql.io.avro.AvroContainerInputFormat",
+                "org.apache.hadoop.hive.ql.io.avro.AvroContainerOutputFormat",
+                "org.apache.hadoop.hive.serde2.avro.AvroSerDe",
+            ) => Ok(FileType::AVRO),
+            (
+                "org.apache.hadoop.mapred.TextInputFormat",
+                "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat",
+                "org.apache.hive.hcatalog.data.JsonSerDe",
+            ) => Ok(FileType::JSON),
+            (
+                "org.apache.hadoop.mapred.TextInputFormat",
+                "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat",
+                "org.openx.data.jsonserde.JsonSerDe",
+            ) => Ok(FileType::JSON),
+            (
+                "org.apache.hadoop.mapred.TextInputFormat",
+                "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat",
+                "com.amazon.ionhiveserde.IonHiveSerDe",
+            ) => Ok(FileType::JSON),
+            _ => Err(error::GlueError::NotImplemented(format!(
+                "No support for: {}, {}, {:?} yet.",
+                input_format, output_format, sd
+            ))),
+        }
+    }
+
+    fn calculate_options(
+        sd: &StorageDescriptor,
+        file_type: &FileType,
+        compression: CompressionTypeVariant,
+    ) -> error::Result<ListingOptions> {
+        let empty_str = String::from("");
+        let serde_info = sd.serde_info.as_ref().ok_or_else(|| {
+            error::GlueError::AWS(
+                "Failed to find serde_info in storage descriptor for glue table".to_string(),
+            )
+        })?;
+        let serde_info_parameters = serde_info.parameters.as_ref().ok_or_else(|| {
+            error::GlueError::AWS(
+                "Failed to find parameters of serde_info in storage descriptor for glue table"
+                    .to_string(),
+            )
+        })?;
         let sd_parameters = match &sd.parameters {
             Some(x) => x.clone(),
             None => HashMap::new(),
         };
 
-        let item: (&str, &str, &str) = (input_format, output_format, serialization_library);
-        let format_result: error::Result<Box<dyn FileFormat>> = match item {
-            (
-                "org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat",
-                "org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat",
-                "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe",
-            ) => Ok(Box::new(ParquetFormat::default())),
-            (
-                "org.apache.hadoop.mapred.TextInputFormat",
-                "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat",
-                "org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe",
-            ) => {
-                let mut format = CsvFormat::default();
+        let format_result: error::Result<Box<dyn FileFormat>> = match file_type {
+            FileType::ARROW => Ok(Box::new(ArrowFormat::default())),
+            FileType::AVRO => Ok(Box::new(AvroFormat::default())),
+            FileType::PARQUET => Ok(Box::new(ParquetFormat::default())),
+            FileType::CSV => {
                 let delim = serde_info_parameters
-                    .get("field.delim")
-                    .ok_or_else(|| {
-                        error::GlueError::AWS(
-                            "Failed to find field.delim in serde_info parameters".to_string(),
-                        )
-                    })?
-                    .as_bytes();
-                let delim_char = delim[0];
-                format = format.with_delimiter(delim_char);
+                    .get("delimiter")
+                    .or_else(|| serde_info_parameters.get("field.delim"))
+                    .map(|s| s.as_str())
+                    .unwrap_or(",");
+                let delim = delim.as_bytes()[0];
                 let has_header = sd_parameters
                     .get("skip.header.line.count")
                     .unwrap_or(&empty_str)
-                    .eq("1");
-                format = format.with_has_header(has_header);
-                Ok(Box::new(format))
+                    .eq("1")
+                    || serde_info_parameters.get("header").unwrap_or(&empty_str) == "true";
+
+                let mut format = CsvFormat::default()
+                    .with_delimiter(delim)
+                    .with_has_header(has_header);
+                if let Some(quote) = serde_info_parameters.get("quote") {
+                    if quote.len() > 0 {
+                        format = format.with_quote(quote.as_bytes()[0]);
+                    }
+                }
+                if let Some(escape) = serde_info_parameters.get("escape") {
+                    format = format.with_escape(escape.as_bytes().get(0).copied());
+                }
+                Ok(Box::new(
+                    format.with_file_compression_type(compression.into()),
+                ))
             }
-            (
-                "org.apache.hadoop.hive.ql.io.avro.AvroContainerInputFormat",
-                "org.apache.hadoop.hive.ql.io.avro.AvroContainerOutputFormat",
-                "org.apache.hadoop.hive.serde2.avro.AvroSerDe",
-            ) => Ok(Box::new(AvroFormat::default())),
-            (
-                "org.apache.hadoop.mapred.TextInputFormat",
-                "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat",
-                "org.apache.hive.hcatalog.data.JsonSerDe",
-            ) => Ok(Box::new(JsonFormat::default())),
-            (
-                "org.apache.hadoop.mapred.TextInputFormat",
-                "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat",
-                "org.openx.data.jsonserde.JsonSerDe",
-            ) => Ok(Box::new(JsonFormat::default())),
-            (
-                "org.apache.hadoop.mapred.TextInputFormat",
-                "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat",
-                "com.amazon.ionhiveserde.IonHiveSerDe",
-            ) => Ok(Box::new(JsonFormat::default())),
-            _ => Err(error::GlueError::NotImplemented(format!(
-                "No support for: {}, {}, {:?} yet.",
-                input_format, output_format, sd
-            ))),
+            FileType::JSON => Ok(Box::new(JsonFormat::default())),
         };
         let format = format_result?;
 
-        let listing_options = ListingOptions {
-            // empty extension doesn't work, as it fails on empty files, like spark _SUCCESS flags
-            // TODO: find a way how to support compressed files, like *.csv.gz
-            file_extension: format.file_type().get_ext(),
-            format: Arc::from(format),
-            table_partition_cols: vec![],
-            collect_stat: true,
-            target_partitions: 1,
-            file_sort_order: vec![],
-        };
-
-        Ok(listing_options)
+        Ok(ListingOptions::new(Arc::from(format))
+            .with_collect_stat(true)
+            .with_target_partitions(1)
+            .with_file_sort_order(vec![]))
     }
 
     fn map_glue_data_type_to_arrow_data_type(
@@ -408,7 +471,7 @@ async fn list_all_files<'a>(
     listing_table_url: &'a ListingTableUrl,
     ctx: &'a SessionState,
     store: &'a dyn ObjectStore,
-    file_extension: &'a str,
+    file_extensions: &'a Vec<String>,
 ) -> Result<BoxStream<'a, Result<ObjectMeta>>> {
     let exec_options = &ctx.options().execution;
     let ignore_subdirectory = exec_options.listing_table_ignore_subdirectory;
@@ -423,7 +486,9 @@ async fn list_all_files<'a>(
     Ok(list
         .try_filter(move |meta| {
             let path = &meta.location;
-            let extension_match = path.as_ref().ends_with(file_extension);
+            let extension_match = file_extensions
+                .iter()
+                .any(|ext| path.as_ref().ends_with(ext));
             let glob_match = listing_table_url.contains(path, ignore_subdirectory);
             futures::future::ready(extension_match && glob_match)
         })
@@ -436,7 +501,7 @@ async fn partition_file_list<'a>(
     part: &'a Option<&'a aws_sdk_glue::types::Partition>,
     store: &'a dyn ObjectStore,
     table_path: &'a ListingTableUrl,
-    file_extension: &'a str,
+    file_extension: &'a Vec<String>,
 ) -> Result<BoxStream<'a, Result<PartitionedFile>>> {
     return Ok(Box::pin(
         list_all_files(table_path, ctx, store, file_extension)
@@ -481,16 +546,22 @@ impl TableProvider for GlueTable {
         limit: Option<usize>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
         let sd = Self::get_storage_descriptor(&self.table)?;
-        let table_url = Self::get_storage_location(sd)?;
+        let file_type = Self::get_file_type(sd)?;
+        let file_exts = file_exts(&file_type);
+
+        let table_url = Self::get_table_location(sd)?;
         let listing_table_url = ListingTableUrl::parse(table_url)?;
         let object_store_url = listing_table_url.object_store();
         let store = state
             .runtime_env()
             .object_store(listing_table_url.clone())?;
-        let mut partitions = vec![];
 
         let part_keys = self.table.partition_keys();
 
+        let database_name = Self::get_database_name(&self.table)?;
+        let table_name = self.table.name();
+
+        let mut partitions = vec![];
         let table_paths = if part_keys.len() > 0 {
             let mut builder = self.client.get_partitions();
             if let Some(expr) = self.get_glue_expr(filters) {
@@ -524,13 +595,7 @@ impl TableProvider for GlueTable {
         };
 
         let file_list = future::try_join_all(table_paths.iter().map(|(p, table_path)| {
-            partition_file_list(
-                state,
-                p,
-                store.as_ref(),
-                table_path,
-                &self.listing_options.file_extension,
-            )
+            partition_file_list(state, p, store.as_ref(), table_path, &file_exts)
         }))
         .await?;
 
@@ -545,14 +610,32 @@ impl TableProvider for GlueTable {
             }
         }
 
+        let compression = partitioned_files
+            .get(0)
+            .and_then(|f| f.path().extension())
+            .and_then(|ext| CompressionTypeVariant::from_str(ext).ok())
+            .unwrap_or(CompressionTypeVariant::UNCOMPRESSED);
+        log::info!("COMPRESSION: {:?}", compression);
+
         let partitioned_file_lists = vec![partitioned_files];
 
         // println!("partitioned_file_lists: {:?}", partitioned_file_lists);
 
         let statistics = Statistics::new_unknown(&self.schema);
         // extract types of partition columns
-        let table_partition_cols = self
-            .listing_options
+
+        let mut listing_options =
+            Self::get_listing_options(database_name, table_name, &sd, &file_type, compression)?;
+        let schema = Self::derive_schema(&self.table)?;
+        let fields = schema.fields();
+        let part_cols = fields[(fields.len() - part_keys.len())..]
+            .iter()
+            .map(|f| (f.name().to_string(), f.data_type().clone()))
+            .collect::<Vec<_>>();
+
+        listing_options = listing_options.with_table_partition_cols(part_cols);
+
+        let table_partition_cols = listing_options
             .table_partition_cols
             .iter()
             .cloned()
@@ -572,7 +655,7 @@ impl TableProvider for GlueTable {
         let n_fields = self.schema().fields().len() - table_partition_cols.len();
         let schema = Schema::new(&self.schema().fields[..n_fields]);
 
-        self.listing_options
+        listing_options
             .format
             .create_physical_plan(
                 state,
