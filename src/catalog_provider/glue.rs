@@ -2,7 +2,6 @@
 
 use crate::error::{GlueError, Result};
 use crate::glue_data_type_parser::*;
-use aws_sdk_glue::config::ProvideCredentials;
 use aws_sdk_glue::types::{Column, StorageDescriptor, Table};
 use aws_sdk_glue::Client;
 use aws_types::SdkConfig;
@@ -17,13 +16,13 @@ use datafusion::datasource::file_format::FileFormat;
 use datafusion::datasource::listing::{
     ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
 };
+use datafusion::datasource::object_store::ObjectStoreRegistry;
 use datafusion::datasource::TableProvider;
 use datafusion::execution::context::SessionState;
 use deltalake::DeltaTableBuilder;
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
-use datafusion::datasource::object_store::ObjectStoreRegistry;
 
 /// Options to register a table
 pub enum TableRegistrationOptions {
@@ -41,7 +40,6 @@ pub struct GlueCatalogProvider {
 }
 
 impl GlueCatalogProvider {
-
     /// Create a new Glue CatalogProvider
     pub fn new(sdk_config: SdkConfig, object_store_registry: Arc<dyn ObjectStoreRegistry>) -> Self {
         let client = Client::new(&sdk_config);
@@ -190,7 +188,8 @@ impl GlueCatalogProvider {
             None => HashMap::new(),
         };
 
-        let table_type = table_parameters.get("table_type")
+        let table_type = table_parameters
+            .get("table_type")
             .map(|x| x.to_lowercase())
             .unwrap_or("".to_string());
         if table_type == "delta" {
@@ -218,39 +217,16 @@ impl GlueCatalogProvider {
         table_name: &String,
         storage_location_uri: &str,
     ) -> Result<()> {
-
-        let url = url::Url::parse(storage_location_uri).map_err(|e| GlueError::Other(format!("Failed to parse {storage_location_uri} as url")))?;
+        let url = url::Url::parse(storage_location_uri).map_err(|_| {
+            GlueError::Other(format!("Failed to parse {storage_location_uri} as url"))
+        })?;
         let object_store = self.object_store_registry.get_store(&url)?;
 
         deltalake::aws::register_handlers(None);
 
         let builder = DeltaTableBuilder::from_uri(storage_location_uri);
 
-        /*
-        let cp = self.sdk_config.credentials_provider().unwrap();
-        let creds = cp
-            .provide_credentials()
-            .await
-            .map_err(|e| GlueError::AWS(format!("Failed to get credentials: {e}")))?;
-
-        let mut storage_options: HashMap<String, String> =
-            HashMap::from_iter(std::env::vars().collect::<Vec<(String, String)>>());
-        storage_options.insert(
-            "aws_access_key_id".to_string(),
-            creds.access_key_id().to_string(),
-        );
-        storage_options.insert(
-            "aws_secret_access_key".to_string(),
-            creds.secret_access_key().to_string(),
-        );
-        if let Some(session_token) = creds.session_token() {
-            storage_options.insert("aws_session_token".to_string(), session_token.to_string());
-        }*/
-
-
-
         let delta_table = builder
-            //.with_storage_options(storage_options)
             .with_storage_backend(object_store, url)
             .load()
             .await
@@ -594,27 +570,6 @@ impl CatalogProvider for GlueCatalogProvider {
         unimplemented!()
     }
 }
-
-/*
-async fn create_delta_table(
-    table: &Table,
-    object_store_registry: &Option<Arc<dyn ObjectStoreRegistry>>,
-) -> Result<Arc<dyn TableProvider>> {
-    let location = table_location(table)?;
-    let url = url::Url::parse(&location)?;
-    let mut builder = DeltaTableBuilder::from_uri(&location);
-
-    if let Ok(object_store) = get_object_store(object_store_registry, &location) {
-        builder = builder.with_storage_backend(object_store, url);
-    }
-
-    builder
-        .with_storage_options(std::env::vars().collect())
-        .load()
-        .await
-        .map(|t| Arc::new(t) as Arc<dyn TableProvider>)
-        .map_err(|e| GlueError::Deltalake(e))
-}*/
 
 #[cfg(test)]
 mod tests {

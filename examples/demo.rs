@@ -19,16 +19,18 @@ use aws_config::BehaviorVersion;
 use aws_sdk_glue::config::{Credentials, ProvideCredentials};
 use aws_types::SdkConfig;
 use dashmap::DashMap;
+use datafusion::arrow::array::StringArray;
 use datafusion::common::{DataFusionError, Result};
 use datafusion::datasource::object_store::ObjectStoreRegistry;
 use datafusion::execution::runtime_env::{RuntimeConfig, RuntimeEnv};
 use datafusion::prelude::*;
-use datafusion_catalogprovider_glue::catalog_provider::glue::{GlueCatalogProvider, TableRegistrationOptions};
+use datafusion_catalogprovider_glue::catalog_provider::glue::{
+    GlueCatalogProvider, TableRegistrationOptions,
+};
 use object_store::aws::AmazonS3Builder;
 use object_store::ObjectStore;
 use std::fmt::Debug;
 use std::sync::Arc;
-use datafusion::arrow::array::StringArray;
 use url::Url;
 
 #[tokio::main]
@@ -48,7 +50,10 @@ async fn main() -> Result<()> {
     let mut glue_catalog_provider = GlueCatalogProvider::new(sdk_config, object_store_provider);
 
     let register_results = glue_catalog_provider
-        .register_all_with_options(&TableRegistrationOptions::DeriveSchemaFromGlueTable, &ctx.state())
+        .register_all_with_options(
+            &TableRegistrationOptions::DeriveSchemaFromGlueTable,
+            &ctx.state(),
+        )
         .await?;
 
     for result in register_results {
@@ -179,7 +184,7 @@ impl ObjectStoreRegistry for DemoS3ObjectStoreProvider {
     }
 
     fn get_store(&self, url: &Url) -> Result<Arc<dyn ObjectStore>> {
-        if let Some(refx)= self.object_stores.get(url) {
+        if let Some(refx) = self.object_stores.get(url) {
             let store = refx.value().clone();
             Ok(store)
         } else {
