@@ -27,6 +27,7 @@ use datafusion::datasource::object_store::ObjectStoreRegistry;
 use iceberg_rust::catalog::Catalog;
 use iceberg_rust::error::Error::TableMetadataBuilder;
 use iceberg_rust::spec::table_metadata::TableMetadata;
+use iceberg_rust::spec::tabular::TabularMetadata;
 use iceberg_rust::table::table_builder::TableBuilder;
 use iceberg_rust::util;
 use iceberg_rust::util::strip_prefix;
@@ -258,11 +259,16 @@ impl GlueCatalogProvider {
 
         let metadata_location = table_parameters.get("metadata_location").ok_or(GlueError::AWS(format!("Did not find metadata_location property in glue catalog")))?;
         let path = Path::parse(&strip_prefix(metadata_location)).map_err(|_| GlueError::Other(format!("Failed to parse {} as path", metadata_location)))?;
-        let metadata: TableMetadata = serde_json::from_slice(&object_store.get(&path)
+
+        let bytes = object_store.get(&path)
             .await.map_err(|e| GlueError::Other(format!("Failed to fetch {e:?} at {path}")))?
             .bytes()
-            .await.map_err(|e|GlueError::Other(format!("Failed to get bytes from {e:?}  at {path}")))?)
+            .await.map_err(|e|GlueError::Other(format!("Failed to get bytes from {e:?}  at {path}")))?;
+        //println!("bytes are as following: {bytes:?}");
+
+        let metadata: TableMetadata = serde_json::from_slice(&bytes)
             .map_err(|e|GlueError::Other(format!("Failed to read metadata from {e:?}  at {path}")))?;
+
 
         println!("metadata: {metadata:?}");
 
