@@ -15,9 +15,10 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use std::fmt::Debug;
+use aws_config::BehaviorVersion;
 use aws_sdk_glue::config::{Credentials, ProvideCredentials};
 use aws_types::SdkConfig;
+use dashmap::DashMap;
 use datafusion::arrow::array::StringArray;
 use datafusion::common::{DataFusionError, Result};
 use datafusion::datasource::object_store::ObjectStoreRegistry;
@@ -28,9 +29,8 @@ use datafusion_catalogprovider_glue::catalog_provider::glue::{
 };
 use object_store::aws::AmazonS3Builder;
 use object_store::ObjectStore;
+use std::fmt::Debug;
 use std::sync::Arc;
-use aws_config::BehaviorVersion;
-use dashmap::DashMap;
 use url::Url;
 
 #[tokio::main]
@@ -41,7 +41,8 @@ async fn main() -> Result<()> {
     // Register an object store provider which creates instances for each requested s3://bucket using the sdk_config credentials
     // As an alternative you can also manually register the required object_store(s)
     let object_store_provider = DemoS3ObjectStoreProvider::new(&sdk_config).await?;
-    let runtime_config = RuntimeConfig::default().with_object_store_registry(Arc::new(object_store_provider));
+    let runtime_config =
+        RuntimeConfig::default().with_object_store_registry(Arc::new(object_store_provider));
     let config = SessionConfig::new().with_information_schema(true);
     let runtime = Arc::new(RuntimeEnv::new(runtime_config)?);
     let ctx = SessionContext::new_with_config_rt(config, runtime);
