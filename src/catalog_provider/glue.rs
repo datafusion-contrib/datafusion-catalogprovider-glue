@@ -21,7 +21,17 @@ use datafusion::datasource::TableProvider;
 use datafusion::execution::context::SessionState;
 use std::any::Any;
 use std::collections::HashMap;
+use std::io::Cursor;
 use std::sync::Arc;
+use datafusion::datasource::object_store::ObjectStoreRegistry;
+use iceberg_rust::catalog::Catalog;
+use iceberg_rust::error::Error::TableMetadataBuilder;
+use iceberg_rust::spec::table_metadata::TableMetadata;
+use iceberg_rust::table::table_builder::TableBuilder;
+use iceberg_rust::util;
+use iceberg_rust::util::strip_prefix;
+use object_store::ObjectStore;
+use object_store::path::Path;
 
 /// Options to register a table
 pub enum TableRegistrationOptions {
@@ -35,22 +45,19 @@ pub enum TableRegistrationOptions {
 pub struct GlueCatalogProvider {
     client: Client,
     schema_provider_by_database: HashMap<String, Arc<MemorySchemaProvider>>,
+    object_store_registry: Arc<dyn ObjectStoreRegistry>,
 }
 
 impl GlueCatalogProvider {
-    /// Convenience wrapper for creating a new `GlueCatalogProvider` using default configuration options.  Only works with AWS.
-    pub async fn default() -> Self {
-        let shared_config = aws_config::load_defaults(BehaviorVersion::latest()).await;
-        GlueCatalogProvider::new(&shared_config)
-    }
 
     /// Create a new Glue CatalogProvider
-    pub fn new(sdk_config: &SdkConfig) -> Self {
+    pub fn new(sdk_config: &SdkConfig, object_store_registry: Arc<dyn ObjectStoreRegistry>) -> Self {
         let client = Client::new(sdk_config);
         let schema_provider_by_database = HashMap::new();
         GlueCatalogProvider {
             client,
             schema_provider_by_database,
+            object_store_registry,
         }
     }
 
@@ -200,7 +207,17 @@ impl GlueCatalogProvider {
             //    .await?;
             todo!();
         } else if table_type == "iceberg" {
-            todo!();
+            self.register_iceberg_table(
+                glue_table,
+                table_registration_options,
+                ctx,
+                database_name,
+                table_name,
+                &sd,
+                storage_location_uri,
+                table_parameters,
+            )
+                .await?
         } else {
             self.register_listing_table(
                 glue_table,
@@ -218,6 +235,62 @@ impl GlueCatalogProvider {
         schema_provider_for_database.register_table(table_name.to_string(), table)?;
 
         Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn register_iceberg_table(
+        &mut self,
+        glue_table: &Table,
+        table_registration_options: &TableRegistrationOptions,
+        ctx: &SessionState,
+        database_name: &str,
+        table_name: &str,
+        sd: &StorageDescriptor,
+        storage_location_uri: &str,
+        table_parameters: HashMap<String, String>,
+    ) -> Result<Arc<dyn TableProvider>> {
+
+        let url = url::Url::parse(storage_location_uri).map_err(|_| {
+            GlueError::Other(format!("Failed to parse {storage_location_uri} as url"))
+        })?;
+
+        let object_store = self.object_store_registry.get_store(&url)?;
+
+        let metadata_location = table_parameters.get("metadata_location").ok_or(GlueError::AWS(format!("Did not find metadata_location property in glue catalog")))?;
+        let path = Path::parse(&strip_prefix(metadata_location)).map_err(|_| GlueError::Other(format!("Failed to parse {} as path", metadata_location)))?;
+        let metadata: TableMetadata = serde_json::from_slice(&object_store.get(&path)
+            .await.map_err(|e| GlueError::Other(format!("Failed to fetch {e:?} at {path}")))?
+            .bytes()
+            .await.map_err(|e|GlueError::Other(format!("Failed to get bytes from {e:?}  at {path}")))?)
+            .map_err(|e|GlueError::Other(format!("Failed to read metadata from {e:?}  at {path}")))?;
+
+        println!("metadata: {metadata:?}");
+
+
+        //let catalog: Arc<dyn Catalog> = todo!();
+
+        //TableMetadataBuilder::
+        //let x = TableBuilder::new()
+
+        /*
+        let listing_options = Self::get_listing_options(database_name, table_name, sd, glue_table)?;
+
+        let ltu = ListingTableUrl::parse(storage_location_uri)?;
+        let ltc = ListingTableConfig::new(ltu);
+        let ltc_with_lo = ltc.with_listing_options(listing_options);
+
+        let ltc_with_lo_and_schema = match table_registration_options {
+            TableRegistrationOptions::DeriveSchemaFromGlueTable => {
+                let schema = Self::derive_schema(database_name, table_name, sd)?;
+                ltc_with_lo.with_schema(SchemaRef::new(schema))
+            }
+            TableRegistrationOptions::InferSchemaFromData => ltc_with_lo.infer_schema(ctx).await?,
+        };
+
+        let listing_table = ListingTable::try_new(ltc_with_lo_and_schema)?;
+        let result = Arc::new(listing_table);
+        Ok(result)*/
+        todo!();
     }
 
     #[allow(clippy::too_many_arguments)]

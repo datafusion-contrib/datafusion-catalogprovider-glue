@@ -18,6 +18,8 @@ pub enum GlueError {
     DataFusion(DataFusionError),
     /// Error during mapping of GlueDataType
     GlueDataTypeMapping(String),
+    /// Other error
+    Other(String),
 }
 
 impl Display for GlueError {
@@ -28,7 +30,8 @@ impl Display for GlueError {
             GlueError::DataFusion(e) => e.fmt(f),
             GlueError::GlueDataTypeMapping(desc) => {
                 write!(f, "Could not map glue data type: {}", desc)
-            }
+            },
+            GlueError::Other(msg) => write!(f, "Other error: {}", msg),
         }
     }
 }
