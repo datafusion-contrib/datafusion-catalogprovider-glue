@@ -17,6 +17,7 @@ use datafusion::datasource::file_format::FileFormat;
 use datafusion::datasource::listing::{
     ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
 };
+use datafusion::datasource::TableProvider;
 use datafusion::execution::context::SessionState;
 use std::any::Any;
 use std::collections::HashMap;
@@ -185,10 +186,52 @@ impl GlueCatalogProvider {
         let sd = Self::get_storage_descriptor(glue_table)?;
         let storage_location_uri = Self::get_storage_location(&sd)?;
 
-        let listing_options =
-            Self::get_listing_options(database_name, table_name, &sd, glue_table)?;
+        let table_parameters = match &glue_table.parameters {
+            Some(x) => x.clone(),
+            None => HashMap::new(),
+        };
+
+        let table_type = table_parameters
+            .get("table_type")
+            .map(|x| x.to_lowercase())
+            .unwrap_or("".to_string());
+        let table = if table_type == "delta" {
+            //self.register_delta_table(database_name, table_name, storage_location_uri)
+            //    .await?;
+            todo!();
+        } else if table_type == "iceberg" {
+            todo!();
+        } else {
+            self.register_listing_table(
+                glue_table,
+                table_registration_options,
+                ctx,
+                database_name,
+                table_name,
+                &sd,
+                storage_location_uri,
+            )
+            .await?
+        };
 
         let schema_provider_for_database = self.ensure_schema_provider_for_database(database_name);
+        schema_provider_for_database.register_table(table_name.to_string(), table)?;
+
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn register_listing_table(
+        &mut self,
+        glue_table: &Table,
+        table_registration_options: &TableRegistrationOptions,
+        ctx: &SessionState,
+        database_name: &str,
+        table_name: &str,
+        sd: &StorageDescriptor,
+        storage_location_uri: &str,
+    ) -> Result<Arc<dyn TableProvider>> {
+        let listing_options = Self::get_listing_options(database_name, table_name, sd, glue_table)?;
 
         let ltu = ListingTableUrl::parse(storage_location_uri)?;
         let ltc = ListingTableConfig::new(ltu);
@@ -196,18 +239,15 @@ impl GlueCatalogProvider {
 
         let ltc_with_lo_and_schema = match table_registration_options {
             TableRegistrationOptions::DeriveSchemaFromGlueTable => {
-                let schema = Self::derive_schema(database_name, table_name, &sd)?;
+                let schema = Self::derive_schema(database_name, table_name, sd)?;
                 ltc_with_lo.with_schema(SchemaRef::new(schema))
             }
             TableRegistrationOptions::InferSchemaFromData => ltc_with_lo.infer_schema(ctx).await?,
         };
 
         let listing_table = ListingTable::try_new(ltc_with_lo_and_schema)?;
-
-        schema_provider_for_database
-            .register_table(table_name.to_string(), Arc::new(listing_table))?;
-
-        Ok(())
+        let result = Arc::new(listing_table);
+        Ok(result)
     }
 
     fn get_listing_options(
