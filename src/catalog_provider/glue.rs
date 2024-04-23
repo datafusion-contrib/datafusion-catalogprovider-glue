@@ -17,7 +17,10 @@ use datafusion::datasource::file_format::FileFormat;
 use datafusion::datasource::listing::{
     ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
 };
+use datafusion::datasource::object_store::ObjectStoreRegistry;
+use datafusion::datasource::TableProvider;
 use datafusion::execution::context::SessionState;
+use deltalake::DeltaTableBuilder;
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -34,6 +37,7 @@ pub enum TableRegistrationOptions {
 pub struct GlueCatalogProvider {
     client: Client,
     schema_provider_by_database: HashMap<String, Arc<MemorySchemaProvider>>,
+    object_store_registry: Option<Arc<dyn ObjectStoreRegistry>>,
 }
 
 impl GlueCatalogProvider {
@@ -185,6 +189,76 @@ impl GlueCatalogProvider {
         let sd = Self::get_storage_descriptor(glue_table)?;
         let storage_location_uri = Self::get_storage_location(&sd)?;
 
+        let table_parameters = match &glue_table.parameters {
+            Some(x) => x.clone(),
+            None => HashMap::new(),
+        };
+
+        let table_type = table_parameters.get("table_type");
+        if table_type.unwrap().to_lowercase() == "delta" {
+            self.register_delta_table(
+                glue_table,
+                ctx,
+                database_name,
+                table_name,
+                &sd,
+                storage_location_uri,
+            )
+            .await?;
+        } else {
+            self.register_listing_table(
+                glue_table,
+                table_registration_options,
+                ctx,
+                database_name,
+                table_name,
+                &sd,
+                storage_location_uri,
+            )
+            .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn register_delta_table(
+        &mut self,
+        glue_table: &Table,
+        ctx: &SessionState,
+        database_name: &str,
+        table_name: &String,
+        sd: &StorageDescriptor,
+        storage_location_uri: &str,
+    ) -> Result<()> {
+
+        let mut builder = DeltaTableBuilder::from_uri(&storage_location_uri);
+
+        self.
+
+        if let Ok(object_store) = get_object_store(object_store_registry, &location) {
+            builder = builder.with_storage_backend(object_store, url);
+        }
+
+        builder
+            .with_storage_options(std::env::vars().collect())
+            .load()
+            .await
+            .map(|t| Arc::new(t) as Arc<dyn TableProvider>)
+            .map_err(|e| GlueError::Deltalake(e))
+
+        Ok(())
+    }
+
+    async fn register_listing_table(
+        &mut self,
+        glue_table: &Table,
+        table_registration_options: &TableRegistrationOptions,
+        ctx: &SessionState,
+        database_name: &str,
+        table_name: &String,
+        sd: &StorageDescriptor,
+        storage_location_uri: &str,
+    ) -> Result<()> {
         let listing_options =
             Self::get_listing_options(database_name, table_name, &sd, glue_table)?;
 
@@ -206,7 +280,6 @@ impl GlueCatalogProvider {
 
         schema_provider_for_database
             .register_table(table_name.to_string(), Arc::new(listing_table))?;
-
         Ok(())
     }
 
@@ -507,6 +580,27 @@ impl CatalogProvider for GlueCatalogProvider {
         unimplemented!()
     }
 }
+
+/*
+async fn create_delta_table(
+    table: &Table,
+    object_store_registry: &Option<Arc<dyn ObjectStoreRegistry>>,
+) -> Result<Arc<dyn TableProvider>> {
+    let location = table_location(table)?;
+    let url = url::Url::parse(&location)?;
+    let mut builder = DeltaTableBuilder::from_uri(&location);
+
+    if let Ok(object_store) = get_object_store(object_store_registry, &location) {
+        builder = builder.with_storage_backend(object_store, url);
+    }
+
+    builder
+        .with_storage_options(std::env::vars().collect())
+        .load()
+        .await
+        .map(|t| Arc::new(t) as Arc<dyn TableProvider>)
+        .map_err(|e| GlueError::Deltalake(e))
+}*/
 
 #[cfg(test)]
 mod tests {

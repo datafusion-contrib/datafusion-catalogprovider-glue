@@ -27,4 +27,9 @@ pest_derive = "2"
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "fs"] }
 url = "2"
 dashmap = "5"
+deltalake = {version = "0.17", optional=true, features=["datafusion", "deltalake-aws", "s3"]}
+
+[features]
+default = ["deltalake"]
+deltalake = ["dep:deltalake"]
 

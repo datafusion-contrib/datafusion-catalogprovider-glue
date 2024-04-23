@@ -50,7 +50,8 @@ async fn main() -> Result<()> {
     let mut glue_catalog_provider = GlueCatalogProvider::new(&sdk_config);
 
     let register_results = glue_catalog_provider
-        .register_all_with_options(&TableRegistrationOptions::InferSchemaFromData, &ctx.state())
+        .register_tables("oidc_aggregates", &ctx.state())
+        //.register_all_with_options(&TableRegistrationOptions::InferSchemaFromData, &ctx.state())
         .await?;
     for result in register_results {
         if result.is_err() {
@@ -66,6 +67,12 @@ async fn main() -> Result<()> {
         .show()
         .await?;
 
+    ctx.sql("select * from glue.oidc_aggregates.customer_frequency_v2 limit 1")
+        .await?
+        .show()
+        .await?;
+
+    /*
     let tables = ctx
         .sql(
             r#"
@@ -104,7 +111,7 @@ async fn main() -> Result<()> {
                 }
             };
         }
-    }
+    }*/
 
     Ok(())
 }
