@@ -320,7 +320,7 @@ impl GlueCatalogProvider {
                 "org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat",
                 "org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat",
                 "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe",
-            ) => Ok(Box::new(ParquetFormat::default())),
+            ) => Ok(Box::<ParquetFormat>::default()),
             (
                 "org.apache.hadoop.mapred.TextInputFormat",
                 "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat",
@@ -348,22 +348,22 @@ impl GlueCatalogProvider {
                 "org.apache.hadoop.hive.ql.io.avro.AvroContainerInputFormat",
                 "org.apache.hadoop.hive.ql.io.avro.AvroContainerOutputFormat",
                 "org.apache.hadoop.hive.serde2.avro.AvroSerDe",
-            ) => Ok(Box::new(AvroFormat::default())),
+            ) => Ok(Box::<AvroFormat>::default()),
             (
                 "org.apache.hadoop.mapred.TextInputFormat",
                 "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat",
                 "org.apache.hive.hcatalog.data.JsonSerDe",
-            ) => Ok(Box::new(JsonFormat::default())),
+            ) => Ok(Box::<JsonFormat>::default()),
             (
                 "org.apache.hadoop.mapred.TextInputFormat",
                 "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat",
                 "org.openx.data.jsonserde.JsonSerDe",
-            ) => Ok(Box::new(JsonFormat::default())),
+            ) => Ok(Box::<JsonFormat>::default()),
             (
                 "org.apache.hadoop.mapred.TextInputFormat",
                 "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat",
                 "com.amazon.ionhiveserde.IonHiveSerDe",
-            ) => Ok(Box::new(JsonFormat::default())),
+            ) => Ok(Box::<JsonFormat>::default()),
             _ => Err(GlueError::NotImplemented(format!(
                 "No support for: {}, {}, {:?} yet.",
                 input_format, output_format, sd
