@@ -185,7 +185,8 @@ impl GlueCatalogProvider {
         let sd = Self::get_storage_descriptor(glue_table)?;
         let storage_location_uri = Self::get_storage_location(&sd)?;
 
-        let listing_options = Self::get_listing_options(database_name, table_name, &sd, glue_table)?;
+        let listing_options =
+            Self::get_listing_options(database_name, table_name, &sd, glue_table)?;
 
         let schema_provider_for_database = self.ensure_schema_provider_for_database(database_name);
 
@@ -281,7 +282,7 @@ impl GlueCatalogProvider {
         }
     }
 
-    fn calculate_options(glue_table: &Table,sd: &StorageDescriptor) -> Result<ListingOptions> {
+    fn calculate_options(glue_table: &Table, sd: &StorageDescriptor) -> Result<ListingOptions> {
         let empty_str = String::from("");
         let input_format = sd.input_format.as_ref().unwrap_or(&empty_str);
         let output_format = sd.output_format.as_ref().unwrap_or(&empty_str);
@@ -369,7 +370,12 @@ impl GlueCatalogProvider {
         let partition_cols = glue_table
             .partition_keys()
             .iter()
-            .map(|c| (c.name().to_owned(), Self::map_glue_data_type(&c.r#type.clone().unwrap()).unwrap()))
+            .map(|c| {
+                (
+                    c.name().to_owned(),
+                    Self::map_glue_data_type(&c.r#type.clone().unwrap()).unwrap(),
+                )
+            })
             .collect::<Vec<(String, DataType)>>();
 
         let listing_options = ListingOptions {
