@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::error::*;
+use crate::error::{GlueError, Result};
 use crate::glue_data_type_parser::*;
-use aws_config::BehaviorVersion;
+use aws_sdk_glue::config::ProvideCredentials;
 use aws_sdk_glue::types::{Column, StorageDescriptor, Table};
 use aws_sdk_glue::Client;
 use aws_types::SdkConfig;
@@ -17,13 +17,13 @@ use datafusion::datasource::file_format::FileFormat;
 use datafusion::datasource::listing::{
     ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
 };
-use datafusion::datasource::object_store::ObjectStoreRegistry;
 use datafusion::datasource::TableProvider;
 use datafusion::execution::context::SessionState;
 use deltalake::DeltaTableBuilder;
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
+use datafusion::datasource::object_store::ObjectStoreRegistry;
 
 /// Options to register a table
 pub enum TableRegistrationOptions {
@@ -37,23 +37,19 @@ pub enum TableRegistrationOptions {
 pub struct GlueCatalogProvider {
     client: Client,
     schema_provider_by_database: HashMap<String, Arc<MemorySchemaProvider>>,
-    object_store_registry: Option<Arc<dyn ObjectStoreRegistry>>,
+    object_store_registry: Arc<dyn ObjectStoreRegistry>,
 }
 
 impl GlueCatalogProvider {
-    /// Convenience wrapper for creating a new `GlueCatalogProvider` using default configuration options.  Only works with AWS.
-    pub async fn default() -> Self {
-        let shared_config = aws_config::load_defaults(BehaviorVersion::latest()).await;
-        GlueCatalogProvider::new(&shared_config)
-    }
 
     /// Create a new Glue CatalogProvider
-    pub fn new(sdk_config: &SdkConfig) -> Self {
-        let client = Client::new(sdk_config);
+    pub fn new(sdk_config: SdkConfig, object_store_registry: Arc<dyn ObjectStoreRegistry>) -> Self {
+        let client = Client::new(&sdk_config);
         let schema_provider_by_database = HashMap::new();
         GlueCatalogProvider {
             client,
             schema_provider_by_database,
+            object_store_registry,
         }
     }
 
@@ -194,17 +190,12 @@ impl GlueCatalogProvider {
             None => HashMap::new(),
         };
 
-        let table_type = table_parameters.get("table_type");
-        if table_type.unwrap().to_lowercase() == "delta" {
-            self.register_delta_table(
-                glue_table,
-                ctx,
-                database_name,
-                table_name,
-                &sd,
-                storage_location_uri,
-            )
-            .await?;
+        let table_type = table_parameters.get("table_type")
+            .map(|x| x.to_lowercase())
+            .unwrap_or("".to_string());
+        if table_type == "delta" {
+            self.register_delta_table(database_name, table_name, storage_location_uri)
+                .await?;
         } else {
             self.register_listing_table(
                 glue_table,
@@ -223,32 +214,56 @@ impl GlueCatalogProvider {
 
     async fn register_delta_table(
         &mut self,
-        glue_table: &Table,
-        ctx: &SessionState,
         database_name: &str,
         table_name: &String,
-        sd: &StorageDescriptor,
         storage_location_uri: &str,
     ) -> Result<()> {
 
-        let mut builder = DeltaTableBuilder::from_uri(&storage_location_uri);
+        let url = url::Url::parse(storage_location_uri).map_err(|e| GlueError::Other(format!("Failed to parse {storage_location_uri} as url")))?;
+        let object_store = self.object_store_registry.get_store(&url)?;
 
-        self.
+        deltalake::aws::register_handlers(None);
 
-        if let Ok(object_store) = get_object_store(object_store_registry, &location) {
-            builder = builder.with_storage_backend(object_store, url);
-        }
+        let builder = DeltaTableBuilder::from_uri(storage_location_uri);
 
-        builder
-            .with_storage_options(std::env::vars().collect())
+        /*
+        let cp = self.sdk_config.credentials_provider().unwrap();
+        let creds = cp
+            .provide_credentials()
+            .await
+            .map_err(|e| GlueError::AWS(format!("Failed to get credentials: {e}")))?;
+
+        let mut storage_options: HashMap<String, String> =
+            HashMap::from_iter(std::env::vars().collect::<Vec<(String, String)>>());
+        storage_options.insert(
+            "aws_access_key_id".to_string(),
+            creds.access_key_id().to_string(),
+        );
+        storage_options.insert(
+            "aws_secret_access_key".to_string(),
+            creds.secret_access_key().to_string(),
+        );
+        if let Some(session_token) = creds.session_token() {
+            storage_options.insert("aws_session_token".to_string(), session_token.to_string());
+        }*/
+
+
+
+        let delta_table = builder
+            //.with_storage_options(storage_options)
+            .with_storage_backend(object_store, url)
             .load()
             .await
             .map(|t| Arc::new(t) as Arc<dyn TableProvider>)
-            .map_err(|e| GlueError::Deltalake(e))
+            .map_err(GlueError::Deltalake)?;
+
+        let schema_provider_for_database = self.ensure_schema_provider_for_database(database_name);
+        schema_provider_for_database.register_table(table_name.to_string(), delta_table)?;
 
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn register_listing_table(
         &mut self,
         glue_table: &Table,
@@ -259,8 +274,7 @@ impl GlueCatalogProvider {
         sd: &StorageDescriptor,
         storage_location_uri: &str,
     ) -> Result<()> {
-        let listing_options =
-            Self::get_listing_options(database_name, table_name, &sd, glue_table)?;
+        let listing_options = Self::get_listing_options(database_name, table_name, sd, glue_table)?;
 
         let schema_provider_for_database = self.ensure_schema_provider_for_database(database_name);
 
@@ -270,7 +284,7 @@ impl GlueCatalogProvider {
 
         let ltc_with_lo_and_schema = match table_registration_options {
             TableRegistrationOptions::DeriveSchemaFromGlueTable => {
-                let schema = Self::derive_schema(database_name, table_name, &sd)?;
+                let schema = Self::derive_schema(database_name, table_name, sd)?;
                 ltc_with_lo.with_schema(SchemaRef::new(schema))
             }
             TableRegistrationOptions::InferSchemaFromData => ltc_with_lo.infer_schema(ctx).await?,

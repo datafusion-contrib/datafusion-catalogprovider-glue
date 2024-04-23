@@ -33,3 +33,6 @@ deltalake = {version = "0.17", optional=true, features=["datafusion", "deltalake
 default = ["deltalake"]
 deltalake = ["dep:deltalake"]
 
+[patch.crates-io]
+deltalake = {path = "../delta-rs/crates/deltalake"}
+
