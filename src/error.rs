@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Custom error type for `DataFusion-CatalogProvider-Glue`
-use aws_sdk_glue::types::SdkError;
+use aws_sdk_glue::error::SdkError;
 use datafusion::common::DataFusionError;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
