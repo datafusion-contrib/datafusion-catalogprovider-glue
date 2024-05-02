@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::error::*;
+use crate::error::{GlueError, Result};
 use crate::glue_data_type_parser::*;
-use aws_config::BehaviorVersion;
 use aws_sdk_glue::types::{Column, StorageDescriptor, Table};
 use aws_sdk_glue::Client;
 use aws_types::SdkConfig;
@@ -17,7 +16,10 @@ use datafusion::datasource::file_format::FileFormat;
 use datafusion::datasource::listing::{
     ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
 };
+use datafusion::datasource::object_store::ObjectStoreRegistry;
+use datafusion::datasource::TableProvider;
 use datafusion::execution::context::SessionState;
+use deltalake::DeltaTableBuilder;
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -34,22 +36,18 @@ pub enum TableRegistrationOptions {
 pub struct GlueCatalogProvider {
     client: Client,
     schema_provider_by_database: HashMap<String, Arc<MemorySchemaProvider>>,
+    object_store_registry: Arc<dyn ObjectStoreRegistry>,
 }
 
 impl GlueCatalogProvider {
-    /// Convenience wrapper for creating a new `GlueCatalogProvider` using default configuration options.  Only works with AWS.
-    pub async fn default() -> Self {
-        let shared_config = aws_config::load_defaults(BehaviorVersion::latest()).await;
-        GlueCatalogProvider::new(&shared_config)
-    }
-
     /// Create a new Glue CatalogProvider
-    pub fn new(sdk_config: &SdkConfig) -> Self {
-        let client = Client::new(sdk_config);
+    pub fn new(sdk_config: SdkConfig, object_store_registry: Arc<dyn ObjectStoreRegistry>) -> Self {
+        let client = Client::new(&sdk_config);
         let schema_provider_by_database = HashMap::new();
         GlueCatalogProvider {
             client,
             schema_provider_by_database,
+            object_store_registry,
         }
     }
 
@@ -185,8 +183,74 @@ impl GlueCatalogProvider {
         let sd = Self::get_storage_descriptor(glue_table)?;
         let storage_location_uri = Self::get_storage_location(&sd)?;
 
-        let listing_options =
-            Self::get_listing_options(database_name, table_name, &sd, glue_table)?;
+        let table_parameters = match &glue_table.parameters {
+            Some(x) => x.clone(),
+            None => HashMap::new(),
+        };
+
+        let table_type = table_parameters
+            .get("table_type")
+            .map(|x| x.to_lowercase())
+            .unwrap_or("".to_string());
+        if table_type == "delta" {
+            self.register_delta_table(database_name, table_name, storage_location_uri)
+                .await?;
+        } else {
+            self.register_listing_table(
+                glue_table,
+                table_registration_options,
+                ctx,
+                database_name,
+                table_name,
+                &sd,
+                storage_location_uri,
+            )
+            .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn register_delta_table(
+        &mut self,
+        database_name: &str,
+        table_name: &String,
+        storage_location_uri: &str,
+    ) -> Result<()> {
+        let url = url::Url::parse(storage_location_uri).map_err(|_| {
+            GlueError::Other(format!("Failed to parse {storage_location_uri} as url"))
+        })?;
+        let object_store = self.object_store_registry.get_store(&url)?;
+
+        deltalake::aws::register_handlers(None);
+
+        let builder = DeltaTableBuilder::from_uri(storage_location_uri);
+
+        let delta_table = builder
+            .with_storage_backend(object_store, url)
+            .load()
+            .await
+            .map(|t| Arc::new(t) as Arc<dyn TableProvider>)
+            .map_err(GlueError::Deltalake)?;
+
+        let schema_provider_for_database = self.ensure_schema_provider_for_database(database_name);
+        schema_provider_for_database.register_table(table_name.to_string(), delta_table)?;
+
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn register_listing_table(
+        &mut self,
+        glue_table: &Table,
+        table_registration_options: &TableRegistrationOptions,
+        ctx: &SessionState,
+        database_name: &str,
+        table_name: &String,
+        sd: &StorageDescriptor,
+        storage_location_uri: &str,
+    ) -> Result<()> {
+        let listing_options = Self::get_listing_options(database_name, table_name, sd, glue_table)?;
 
         let schema_provider_for_database = self.ensure_schema_provider_for_database(database_name);
 
@@ -196,7 +260,7 @@ impl GlueCatalogProvider {
 
         let ltc_with_lo_and_schema = match table_registration_options {
             TableRegistrationOptions::DeriveSchemaFromGlueTable => {
-                let schema = Self::derive_schema(database_name, table_name, &sd)?;
+                let schema = Self::derive_schema(database_name, table_name, sd)?;
                 ltc_with_lo.with_schema(SchemaRef::new(schema))
             }
             TableRegistrationOptions::InferSchemaFromData => ltc_with_lo.infer_schema(ctx).await?,
@@ -206,7 +270,6 @@ impl GlueCatalogProvider {
 
         schema_provider_for_database
             .register_table(table_name.to_string(), Arc::new(listing_table))?;
-
         Ok(())
     }
 
@@ -385,7 +448,6 @@ impl GlueCatalogProvider {
             collect_stat: true,
             target_partitions: 1,
             file_sort_order: vec![],
-            file_type_write_options: None,
         };
 
         Ok(listing_options)

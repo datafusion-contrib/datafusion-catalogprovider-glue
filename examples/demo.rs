@@ -40,18 +40,22 @@ async fn main() -> Result<()> {
 
     // Register an object store provider which creates instances for each requested s3://bucket using the sdk_config credentials
     // As an alternative you can also manually register the required object_store(s)
-    let object_store_provider = DemoS3ObjectStoreProvider::new(&sdk_config).await?;
+    let object_store_provider = Arc::new(DemoS3ObjectStoreProvider::new(&sdk_config).await?);
     let runtime_config =
-        RuntimeConfig::default().with_object_store_registry(Arc::new(object_store_provider));
+        RuntimeConfig::default().with_object_store_registry(object_store_provider.clone());
     let config = SessionConfig::new().with_information_schema(true);
     let runtime = Arc::new(RuntimeEnv::new(runtime_config)?);
     let ctx = SessionContext::new_with_config_rt(config, runtime);
 
-    let mut glue_catalog_provider = GlueCatalogProvider::new(&sdk_config);
+    let mut glue_catalog_provider = GlueCatalogProvider::new(sdk_config, object_store_provider);
 
     let register_results = glue_catalog_provider
-        .register_all_with_options(&TableRegistrationOptions::InferSchemaFromData, &ctx.state())
+        .register_all_with_options(
+            &TableRegistrationOptions::DeriveSchemaFromGlueTable,
+            &ctx.state(),
+        )
         .await?;
+
     for result in register_results {
         if result.is_err() {
             // only output tables which were not registered...
@@ -122,11 +126,11 @@ async fn sample(ctx: SessionContext, schema: &str, table: &str, limit: usize) ->
 pub struct DemoS3ObjectStoreProvider {
     credentials: Credentials,
     region: String,
-    object_stores: tokio::sync::RwLock<DashMap<Url, Arc<dyn ObjectStore>>>,
+    object_stores: DashMap<Url, Arc<dyn ObjectStore>>,
 }
 
 impl DemoS3ObjectStoreProvider {
-    pub async fn new(sdk_config: &SdkConfig) -> crate::Result<DemoS3ObjectStoreProvider> {
+    pub async fn new(sdk_config: &SdkConfig) -> Result<DemoS3ObjectStoreProvider> {
         let credentials_provider = sdk_config
             .credentials_provider()
             .expect("could not find credentials provider");
@@ -139,8 +143,7 @@ impl DemoS3ObjectStoreProvider {
             .map(|r| r.to_string())
             .unwrap_or_else(|| "eu-central-1".to_string());
 
-        let object_stores: tokio::sync::RwLock<DashMap<Url, Arc<dyn ObjectStore>>> =
-            tokio::sync::RwLock::new(DashMap::new());
+        let object_stores = DashMap::new();
 
         Ok(DemoS3ObjectStoreProvider {
             credentials,
@@ -149,7 +152,7 @@ impl DemoS3ObjectStoreProvider {
         })
     }
 
-    fn build_s3_object_store(&self, url: &Url) -> crate::Result<Arc<dyn ObjectStore>> {
+    fn build_s3_object_store(&self, url: &Url) -> Result<Arc<dyn ObjectStore>> {
         let bucket_name = get_host_name(url)?;
 
         let s3_builder = AmazonS3Builder::new()
@@ -175,14 +178,20 @@ impl ObjectStoreRegistry for DemoS3ObjectStoreProvider {
         store: Arc<dyn ObjectStore>,
     ) -> Option<Arc<dyn ObjectStore>> {
         {
-            let guard = self.object_stores.blocking_write();
-            guard.insert(url.clone(), store.clone());
+            self.object_stores.insert(url.clone(), store.clone());
         }
         Some(store.clone())
     }
 
     fn get_store(&self, url: &Url) -> Result<Arc<dyn ObjectStore>> {
-        self.build_s3_object_store(url)
+        if let Some(refx) = self.object_stores.get(url) {
+            let store = refx.value().clone();
+            Ok(store)
+        } else {
+            let store = self.build_s3_object_store(url)?;
+            let _ = self.register_store(url, store.clone());
+            Ok(store)
+        }
     }
 }
 
