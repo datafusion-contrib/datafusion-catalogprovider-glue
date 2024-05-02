@@ -448,7 +448,6 @@ impl GlueCatalogProvider {
             collect_stat: true,
             target_partitions: 1,
             file_sort_order: vec![],
-            file_type_write_options: None,
         };
 
         Ok(listing_options)

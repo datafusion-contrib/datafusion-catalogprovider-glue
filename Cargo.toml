@@ -20,8 +20,8 @@ path = "src/lib.rs"
 aws-config = "1"
 aws-sdk-glue = "1"
 aws-types = "1"
-datafusion = { version = "36", features = ["avro"] }
-object_store = { version = "0.9", features = ["aws"] }
+datafusion = { version = "37", features = ["avro"] }
+object_store = { version = "0.10", features = ["aws"] }
 pest = "2"
 pest_derive = "2"
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "fs"] }
@@ -32,7 +32,4 @@ deltalake = {version = "0.17", optional=true, features=["datafusion", "deltalake
 [features]
 default = ["deltalake"]
 deltalake = ["dep:deltalake"]
-
-[patch.crates-io]
-deltalake = {path = "../delta-rs/crates/deltalake"}
 
