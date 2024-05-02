@@ -9,14 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.4.0](https://github.com/datafusion-contrib/datafusion-catalogprovider-glue/compare/v0.3.0...v0.4.0) - 2024-05-02
 
 ### Added
-- add support for deltalake
-- support for deltalake (wip)
-
-### Fixed
-- revert to object_store 0.9 as delta-rs is still on that
-- update to latest delta-rs release
+- Add support for deltalake
 
 ### Other
-- clippy + fmt
-- added changelog file
+- Added changelog file
 
